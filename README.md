@@ -38,14 +38,24 @@ When it finishes you'll have a **`hal_pool\`** folder here with `hal_pool_01.mp3
 hal_pool_20.mp3` + `manifest.json`.
 
 ## Bring it back to the laptop
-Copy the whole **`hal_pool\`** folder into the laptop at:
 
-```
-%USERPROFILE%\.claude\hal_pool\
+**Option A — git (easiest).** From this folder on the PC (hal_pool is gitignored, so
+force-add it):
+
+```powershell
+git add -f hal_pool
+git commit -m "rendered pool"
+git push
 ```
 
-(overwriting what's there). That's it — the announcer picks it up automatically; no
-other changes needed on the laptop.
+Then on the laptop, Claude can `git pull` this repo and drop `hal_pool\` into
+`%USERPROFILE%\.claude\hal_pool\` for you — just say "the pool is on github, install it."
+
+**Option B — manual.** Copy the whole `hal_pool\` folder onto USB/cloud and into the
+laptop at `%USERPROFILE%\.claude\hal_pool\` (overwriting what's there).
+
+Either way, that's it — the announcer picks the new pool up automatically; no other
+changes needed on the laptop.
 
 ## Notes / gotchas
 - **torchcodec error** ("Could not load libtorchcodec…"): newer torch (≥2.9) routes
