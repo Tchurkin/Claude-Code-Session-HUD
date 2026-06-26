@@ -95,7 +95,10 @@ $render = {
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    # Outer glow: concentric rounded strokes bleeding into the transparent margin
+    # Outer glow on TOP / RIGHT / BOTTOM only - clip out the left margin so the left
+    # edge reads as a solid green border instead of glow.
+    $glowClip = New-Object System.Drawing.RectangleF ([float]$GLOW, 0, [float]($FORM_W - $GLOW), [float]$FORM_H)
+    $g.SetClip($glowClip)
     for ($sp = $GLOW; $sp -ge 1; $sp--) {
         $alpha = [int](190 * [Math]::Exp(-$sp * 0.28))
         if ($alpha -lt 4) { continue }
@@ -104,16 +107,17 @@ $render = {
         $pen = New-Object System.Drawing.Pen((CA $alpha $ACCENT), 1.5)
         $g.DrawPath($pen, $gp); $pen.Dispose(); $gp.Dispose()
     }
+    $g.ResetClip()
 
     # Content: semi-transparent dark fill
     $cpath = RoundedPath $GLOW $GLOW $CW $CH $R
     $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(224, 18, 18, 18))
     $g.FillPath($bg, $cpath); $bg.Dispose()
 
-    # Accent strip (clipped to rounded content)
+    # Solid green LEFT border (~2x the old accent strip), clipped to the content shape
     $g.SetClip($cpath)
     $sb = New-Object System.Drawing.SolidBrush $ACCENT
-    $g.FillRectangle($sb, $GLOW, $GLOW, 5, $CH); $sb.Dispose()
+    $g.FillRectangle($sb, $GLOW, $GLOW, 10, $CH); $sb.Dispose()
     $g.ResetClip()
 
     # Border
