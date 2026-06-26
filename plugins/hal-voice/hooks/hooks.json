@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$d = [Console]::In.ReadToEnd(); $d | python \"${CLAUDE_PLUGIN_ROOT}/scripts/pre_tool_status.py\"",
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pre_tool_status.py"],
             "timeout": 20
           }
         ]
@@ -18,7 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$d = [Console]::In.ReadToEnd(); $d | python \"${CLAUDE_PLUGIN_ROOT}/scripts/track_action.py\"",
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/track_action.py"],
             "timeout": 20
           }
         ]
@@ -29,8 +31,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "Start-Process -FilePath python -ArgumentList '\"${CLAUDE_PLUGIN_ROOT}/scripts/hal_announce.py\"' -WindowStyle Hidden",
-            "timeout": 20
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hal_announce.py"],
+            "async": true,
+            "timeout": 120
           }
         ]
       }
