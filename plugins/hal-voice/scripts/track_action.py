@@ -81,7 +81,7 @@ def classify_bash(cmd):
 
 def main():
     try:
-        data = json.loads(sys.stdin.read())
+        data = json.loads(sys.stdin.read().lstrip("﻿"))  # tolerate a stray BOM
     except Exception:
         return
 
