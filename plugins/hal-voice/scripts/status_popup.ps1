@@ -45,7 +45,9 @@ public class PerPixelLayered {
 try { Add-Type -TypeDefinition $src -ReferencedAssemblies System.Drawing, System.Windows.Forms } catch {}
 
 $screen   = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$PID_FILE = "$env:USERPROFILE\.claude\status_popup_pid.txt"
+$dataDir  = Join-Path $env:USERPROFILE ".claude\hal_voice"
+try { [System.IO.Directory]::CreateDirectory($dataDir) | Out-Null } catch {}
+$PID_FILE = Join-Path $dataDir "status_popup.pid"
 try { [System.IO.File]::WriteAllText($PID_FILE, $PID.ToString()) } catch {}
 
 $CW=440; $R=6; $GLOW=16; $PAD_L=18; $PAD_T=10; $BAR_H=3

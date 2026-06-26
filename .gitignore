@@ -2,6 +2,7 @@ venv/
 tts_venv/
 __pycache__/
 *.pyc
+*.tmp
 # never commit secrets
 .openai_key
 *.key

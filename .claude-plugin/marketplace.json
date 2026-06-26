@@ -1,0 +1,12 @@
+{
+  "name": "hal-bundle",
+  "owner": { "name": "Braxton Herold" },
+  "description": "HAL 9000 voice + UX plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "hal-voice",
+      "source": "./plugins/hal-voice",
+      "description": "HAL 9000 voice announcements + status popups, with live F5-TTS synthesis and a git-shared voice pool."
+    }
+  ]
+}

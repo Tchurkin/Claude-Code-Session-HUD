@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "hal-voice",
+  "displayName": "HAL 9000 Voice",
+  "version": "0.2.0",
+  "description": "HAL 9000 speaks when Claude finishes, plus status/completion popups. Synthesizes tailored lines live with F5-TTS on a GPU machine, falls back to a pre-rendered voice pool that is shared across your devices via git.",
+  "author": { "name": "Braxton Herold" },
+  "repository": "https://github.com/Tchurkin/hal-voice-bundle",
+  "license": "MIT",
+  "keywords": ["hal", "9000", "tts", "voice", "f5-tts", "notifications", "hooks", "windows"]
+}
