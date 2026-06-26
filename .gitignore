@@ -1,4 +1,7 @@
 venv/
-hal_pool/
+tts_venv/
 __pycache__/
 *.pyc
+# never commit secrets
+.openai_key
+*.key
