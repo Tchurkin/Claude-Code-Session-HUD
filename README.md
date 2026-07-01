@@ -25,10 +25,10 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 
 | Feature | What it does |
 |---|---|
-| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's own color. |
+| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's own color. It stays put while the chat's window is open (it won't vanish from disuse), and the tab for the window you're currently in stays lit. |
 | **Live state** | The badge shows **✓ done**, a **breathing dot = working**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal. |
 | **Smart name** | The badge is labelled with a 1–3 word summary of what the chat has been working on (from the transcript, via an LLM), not just the folder name. |
-| **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to dismiss it. |
+| **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to hide it — it comes back when you refocus that window or send the chat a new prompt. Hover a badge (or the button) for a hint on what the clicks do. |
 | **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
 | **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |
 | **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — click it to jump to the chat, hover to keep it up. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |

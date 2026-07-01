@@ -407,11 +407,15 @@ def _ensure_singleton(name, ps1):
 
 
 def _gc_stale():
+    # Only reap state whose badge is NOT running (no fresh heartbeat) and has since gone quiet. A
+    # live badge - even an idle one whose window is still open - keeps its state so the tab persists.
     now = time.time() * 1000
     for f in glob.glob(os.path.join(BADGE_DIR, "*.json")):
+        sid8 = os.path.basename(f)[:-5]
+        if _alive_fresh(sid8):
+            continue
         try:
             if now - float(json.load(open(f, encoding="utf-8")).get("ts", 0)) > IDLE_MS:
-                sid8 = os.path.basename(f)[:-5]
                 for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive")):
                     try: os.remove(p)
                     except Exception: pass
@@ -425,15 +429,13 @@ def _active_slots(exclude_sid):
     ex   = _sid8(exclude_sid)
     used = set()
     for f in glob.glob(os.path.join(BADGE_DIR, "*.json")):
-        if os.path.basename(f)[:-5] == ex:
-            continue
+        sid8 = os.path.basename(f)[:-5]
+        if sid8 == ex or not _alive_fresh(sid8):
+            continue                                   # only a session with a live badge holds a color
         try:
-            d = json.load(open(f, encoding="utf-8"))
+            s = json.load(open(f, encoding="utf-8")).get("slot")
         except Exception:
             continue
-        if (now - float(d.get("ts", 0))) > IDLE_MS:
-            continue                                   # stale session, its slot is free again
-        s = d.get("slot")
         if s is not None:
             try: used.add(int(s))
             except Exception: pass
@@ -462,8 +464,9 @@ def _dedupe_window(session_id, hwnd):
             d = json.load(open(f, encoding="utf-8"))
         except Exception:
             continue
-        if int(d.get("hwnd") or 0) == hwnd and (now - float(d.get("ts", 0))) < IDLE_MS:
-            recent.append((float(d.get("ts", 0)), os.path.basename(f)[:-5], f))
+        sid8 = os.path.basename(f)[:-5]
+        if int(d.get("hwnd") or 0) == hwnd and _alive_fresh(sid8):
+            recent.append((float(d.get("ts", 0)), sid8, f))
     if len(recent) <= 1:
         return True
     keeper = max(recent)[1]                          # newest ts owns this window's badge
@@ -512,13 +515,15 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     st = state or prev.get("state") or "done"
     branch = _git_branch(cwd) if capture_hwnd else (prev.get("branch") or "")   # feature/worktree branch
     reason_val = _short(reason, 30) if reason else (prev.get("reason") or "")    # what it's waiting on
-
+    present_ts = now if capture_hwnd else float(prev.get("present_ts") or 0)      # last time the user was here
+                                                                                 # (drives un-hiding a dismissed tab)
     sp = _state_path(session_id)
     try:
         tmp = sp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": now, "color": [r, g, b], "slot": slot, "label": label, "hwnd": hwnd,
-                       "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val}, f)
+                       "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val,
+                       "present_ts": present_ts}, f)
         os.replace(tmp, sp)
     except Exception:
         return

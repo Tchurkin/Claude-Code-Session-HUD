@@ -36,7 +36,8 @@ if ($st) {
 }
 
 $GLOW=12; $R_CORNER=5; $PAD_L=12; $PAD_R=12; $BAR_W=6; $DOTSZ=7
-$hFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$hFont   = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$tipFont = New-Object System.Drawing.Font("Segoe UI", 7.5)
 
 # The chip text: what it's waiting on (when awaiting input), else the topic + its branch.
 function DisplayText {
@@ -70,6 +71,11 @@ $script:lastTop = -99999
 $script:tick = 0
 $script:closeReq = $false
 $script:hover = $false
+$script:active = $false       # our chat's window is focused -> keep the tab lit (the tab you're on)
+$script:hidden = $false       # right-click hides the tab until you return to its window / chat again
+$script:armed  = $false       # (hidden) we've since left the window, so refocusing it re-shows the tab
+$script:dismissAt = 0         # when the tab was hidden (ms), compared against state.present_ts
+$script:presentTs = 0         # last time the user was actively present in this chat (from state)
 
 $form = New-Object System.Windows.Forms.Form
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -95,13 +101,15 @@ function RoundedPath($x,$y,$w,$h,$rad){
 
 $render = {
     $accent = [System.Drawing.Color]::FromArgb($script:R, $script:G, $script:B)
-    # Hover state lights the chip up: brighter glow, lighter fill, stronger border, fully opaque.
-    $glowBase = if ($script:hover) { 205 } else { 120 }
-    $bgAlpha  = if ($script:hover) { 246 } else { 228 }
-    $bgShade  = if ($script:hover) { 44 }  else { 17 }
-    $borderA  = if ($script:hover) { 255 } else { 200 }
-    $borderW  = if ($script:hover) { 1.9 } else { 1.2 }
-    $winAlpha = if ($script:hover) { 255 } else { 240 }
+    # The chip lights up when hovered OR when its own chat window is focused (the tab you're on).
+    $lit = ($script:hover -or $script:active)
+    $glowBase = if ($lit) { 205 } else { 120 }
+    $bgAlpha  = if ($lit) { 246 } else { 228 }
+    $bgShade  = if ($lit) { 44 }  else { 17 }
+    $borderA  = if ($lit) { 255 } else { 200 }
+    $borderW  = if ($lit) { 1.9 } else { 1.2 }
+    $winAlpha = if ($lit) { 255 } else { 240 }
+    if ($script:hidden) { $winAlpha = 0 }              # right-click-hidden: invisible but still alive
     # The chip is right-aligned inside the (wide) transparent canvas; this is its left edge.
     $cx = $FORM_W - $GLOW - $script:CW
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -163,6 +171,23 @@ $render = {
         $g.DrawString($disp, $hFont, $tb, [float]($dotX + $DOTSZ + 8), [float]$ty); $tb.Dispose()
     }
 
+    # Hover hint: a small how-to-interact chip to the LEFT of the tab (only on real mouse hover).
+    if ($script:hover) {
+        $tip = "Left-click: jump     Right-click: hide"
+        $tw  = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
+        $tbw = $tw + 14; $tbh = 18
+        $tbx = $cx - 8 - $tbw
+        if ($tbx -lt 2) { $tbx = 2 }
+        $tby = $GLOW + [int](($script:CH - $tbh)/2)
+        $tpath = RoundedPath $tbx $tby $tbw $tbh 4
+        $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(238, 22, 22, 24))
+        $g.FillPath($tbg, $tpath); $tbg.Dispose()
+        $tpen = New-Object System.Drawing.Pen((CA 110 $accent), 1)
+        $g.DrawPath($tpen, $tpath); $tpen.Dispose(); $tpath.Dispose()
+        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(214,214,218))
+        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 7), [float]($tby + 3)); $ttb.Dispose()
+    }
+
     $g.Dispose()
     [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, $winAlpha)
     $bmp.Dispose()
@@ -172,7 +197,11 @@ $render = {
 $form.Add_MouseDown({
     param($s, $e)
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
-        $script:closeReq = $true
+        # Hide, don't destroy: the tab returns when you refocus its window or chat with it again.
+        $script:hidden = $true; $script:armed = $false; $script:hover = $false
+        $script:dismissAt = NowMsLocal
+        try { Stack-Sync $script:CH $false } catch {}   # release our slot so the others close the gap
+        & $render                                        # blit invisible immediately
     } elseif ($script:Hwnd -ne 0) {
         try { [PerPixelLayered]::FocusWindow([IntPtr]$script:Hwnd) } catch {}
     }
@@ -187,11 +216,10 @@ $timer.Add_Tick({
     $script:tick++
     if (($script:tick % 20) -eq 1) {
         $now = NowMsLocal
-        try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}
+        try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while hidden)
         $st = Read-State
         if ($null -eq $st) { $script:closeReq = $true }      # state gone -> chat cleaned up
         else {
-            if ((($now - [int64]$st.ts) -gt $IdleMs)) { $script:closeReq = $true }   # chat idle too long
             $changed = $false
             if ($st.color -and $st.color.Count -ge 3) {
                 $nr=[int]$st.color[0]; $ng=[int]$st.color[1]; $nb=[int]$st.color[2]
@@ -206,14 +234,34 @@ $timer.Add_Tick({
                 Recalc; $changed = $true    # any of these can change the chip's displayed text/width
             }
             if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
-            # If this chat's window has been closed, retire the badge (its handle is dead).
+            if ($st.present_ts) { $script:presentTs = [int64]$st.present_ts }
+            # Only retire the tab when its window is actually gone (no idle timeout -> tabs persist).
             if ($script:Hwnd -ne 0 -and -not [PerPixelLayered]::WindowExists([IntPtr]$script:Hwnd)) { $script:closeReq = $true }
-            if ($changed) { & $render }
+            if ($changed -and -not $script:hidden) { & $render }
         }
-        $ordered = Stack-Sync $script:CH $true                # heartbeat + recompute our slot
-        $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+        if (-not $script:hidden) {
+            $ordered = Stack-Sync $script:CH $true            # heartbeat our slot + recompute stack order
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+        } else {
+            try { Stack-Sync $script:CH $false } catch {}     # hidden: hold no stack slot
+        }
     }
     if ($script:closeReq) { $form.Close(); return }
+
+    # The focused window drives the "tab you're on" highlight and un-hiding a dismissed tab.
+    $fg = ([PerPixelLayered]::GetForegroundWindow()).ToInt64()
+    $isOwn = ($script:Hwnd -ne 0 -and $fg -eq [int64]$script:Hwnd)
+
+    if ($script:hidden) {
+        if (-not $isOwn -and $fg -ne $form.Handle.ToInt64()) { $script:armed = $true }   # you've left the window
+        if (($script:armed -and $isOwn) -or ($script:presentTs -gt $script:dismissAt)) {
+            $script:hidden = $false; $script:active = $isOwn; & $render                   # returned / chatted -> restore
+        } else {
+            return                                                                        # stay hidden this tick
+        }
+    }
+
+    if ($isOwn -ne $script:active) { $script:active = $isOwn; & $render }                 # active-tab highlight
 
     $delta = $script:target - $script:curTop
     if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * 0.22 }
@@ -224,9 +272,8 @@ $timer.Add_Tick({
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
 
-    # Hover: light the chip up while the cursor is over it. A per-pixel layered window only
-    # "owns" its visible pixels, so poll the cursor against the chip's screen rect (MouseLeave
-    # is unreliable here). Cheap point-in-rect test each tick; re-render only when it flips.
+    # Hover: light the chip + show the how-to hint while the cursor is over it (cursor-rect poll;
+    # MouseLeave is unreliable on layered windows). Re-render only when hover flips.
     $chipL = $form.Left + ($FORM_W - $GLOW - $script:CW)
     $chipT = $form.Top + $GLOW
     $cp = [System.Windows.Forms.Cursor]::Position
