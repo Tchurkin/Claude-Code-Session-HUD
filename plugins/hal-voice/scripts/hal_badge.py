@@ -125,6 +125,47 @@ def _find_chat_window(cwd):
         return 0
 
 
+def _window_title(hwnd):
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        n = u.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u.GetWindowTextW(hwnd, buf, n + 1)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _hwnd_ok(hwnd, proj):
+    """The stored handle is still a live VS Code window for this chat's project."""
+    if not hwnd:
+        return False
+    try:
+        if not ctypes_is_window(hwnd):
+            return False
+    except Exception:
+        return False
+    t = _window_title(hwnd)
+    return t.endswith("Visual Studio Code") and (not proj or proj in t)
+
+
+def ctypes_is_window(hwnd):
+    import ctypes
+    return bool(ctypes.windll.user32.IsWindow(hwnd))
+
+
+def _capture_hwnd(cwd):
+    """Best guess at this chat's VS Code window: the focused window when it belongs to this
+    project (you just typed there), else the window whose title names the project, else the
+    focused VS Code window."""
+    proj = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
+    fg = _foreground_hwnd()                       # focused VS Code window or 0
+    if fg and (not proj or proj in _window_title(fg)):
+        return fg
+    return _find_chat_window(cwd) or fg
+
+
 # ── "working on" label from the recent transcript ──────────────────────────────
 def _tail_lines(path, maxbytes=262144):
     try:
@@ -342,13 +383,14 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     now  = int(time.time() * 1000)
     prev = _read_state(session_id)
     r, g, b = hc.session_color(session_id)
+    proj   = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
+    prev_h = int(prev.get("hwnd") or 0)
     if capture_hwnd:
-        # Match this chat's project to its VS Code window (reliable); fall back to the focused
-        # VS Code window, then to the last good handle.
-        h = _find_chat_window(cwd) or _foreground_hwnd()
-        hwnd = h if h else int(prev.get("hwnd") or 0)
+        hwnd = _capture_hwnd(cwd) or prev_h          # user is here -> prefer the focused window
+    elif _hwnd_ok(prev_h, proj):
+        hwnd = prev_h                                # stored handle still valid -> keep it
     else:
-        hwnd = int(prev.get("hwnd") or 0)
+        hwnd = _find_chat_window(cwd) or prev_h      # stale/wrong -> re-find by project title
 
     label    = prev.get("label") or ""
     label_ts = float(prev.get("label_ts") or 0)
