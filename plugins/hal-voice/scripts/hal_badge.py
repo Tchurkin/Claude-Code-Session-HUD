@@ -274,9 +274,9 @@ def _claude_exe():
     return _CLAUDE_EXE
 
 
-def _claude_cli_topic(prompt):
-    """Name the tab through the user's Claude Code login (no API key). Runs headless in a temp
-    cwd (so it won't load the project's context) with HAL_SUPPRESS set so its own hooks no-op."""
+def _claude_cli_run(prompt):
+    """Run a short completion through the user's Claude Code login (no API key). Headless, in a
+    temp cwd (won't load project context), with HAL_SUPPRESS set so its own hooks no-op."""
     exe = _claude_exe()
     if not exe:
         return None
@@ -289,41 +289,36 @@ def _claude_cli_topic(prompt):
         t = (r.stdout or "").strip()
         if t:
             t = t.splitlines()[0].strip().strip('."\'').strip()
-        if t and len(t) <= 40:
-            return _short(t, 30)
+        if t and len(t) <= 60:
+            return t
     except Exception:
         pass
     return None
 
 
-def _llm_topic(msgs):
-    """1-3 word theme of the RECENT focus. This is a Claude Code plugin, so it uses Claude: an
-    Anthropic API key if set, else the local Claude Code CLI (your subscription, no key). OpenAI
-    is opt-in only (config `use_openai`). Reflects current work so a chat re-labels on a shift."""
-    convo = "\n".join(f"{r}: {t[:220]}" for r, t in msgs)[-4200:]
-    prompt = ("Below are recent messages from an ongoing coding chat, oldest to newest:\n\n"
-              + convo +
-              "\n\nName what this chat is currently working on in 1 to 3 words (Title Case, no "
-              "quotes or punctuation), reflecting the RECENT focus. Reply with ONLY the phrase.")
+def _llm_run(prompt, max_tokens=16):
+    """Short completion via Claude: an Anthropic API key if set, else the local Claude Code CLI
+    (your subscription, no key). OpenAI only if opted in (config `use_openai`). Returns a cleaned
+    one-line string or None."""
     akey = _anthropic_key()
     if akey:
         try:
             import anthropic
             m = anthropic.Anthropic(api_key=akey, timeout=6.0).messages.create(
-                model="claude-haiku-4-5-20251001", max_tokens=12,
+                model="claude-haiku-4-5-20251001", max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}])
             t = m.content[0].text.strip().strip('."\'').strip()
             if t:
-                return _short(t, 30)
+                return t
         except Exception:
             pass
-    t = _claude_cli_topic(prompt)          # your existing Claude Code login - no API key needed
+    t = _claude_cli_run(prompt)            # your existing Claude Code login - no API key needed
     if t:
         return t
     if hc.load_config().get("use_openai", False) and _openai_key():   # ChatGPT: opt-in, off by default
         key = _openai_key()
         try:
-            body = json.dumps({"model": "gpt-4o-mini", "max_tokens": 12, "temperature": 0.3,
+            body = json.dumps({"model": "gpt-4o-mini", "max_tokens": max_tokens, "temperature": 0.3,
                                "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
             req = urllib.request.Request(
                 "https://api.openai.com/v1/chat/completions", data=body,
@@ -332,10 +327,37 @@ def _llm_topic(msgs):
                 d = json.loads(resp.read().decode("utf-8"))
             t = d["choices"][0]["message"]["content"].strip().strip('."\'').strip()
             if t:
-                return _short(t, 30)
+                return t
         except Exception:
             pass
     return None
+
+
+def _llm_topic(msgs):
+    """1-3 word Title-Case theme of the RECENT focus (the tab name)."""
+    convo = "\n".join(f"{r}: {t[:220]}" for r, t in msgs)[-4200:]
+    prompt = ("Below are recent messages from an ongoing coding chat, oldest to newest:\n\n"
+              + convo +
+              "\n\nName what this chat is currently working on in 1 to 3 words (Title Case, no "
+              "quotes or punctuation), reflecting the RECENT focus. Reply with ONLY the phrase.")
+    t = _llm_run(prompt, 12)
+    return _short(t, 30) if t else None
+
+
+def _action_phrase(prompt_text):
+    """A short human summary of the task the chat was just given - e.g. 'adding servos to
+    schematic', 'fixing sim bug', 'testing popup visuals'. Used as the status card's description."""
+    prompt_text = (prompt_text or "").strip()
+    if not prompt_text:
+        return None
+    p = ("A coding assistant was just given this request:\n\n" + prompt_text[:1500] +
+         "\n\nDescribe what it is about to work on as a SHORT lowercase action phrase of 2 to 5 "
+         "words in gerund form - e.g. \"fixing sim bug\", \"adding servos to schematic\", "
+         "\"testing popup visuals\". Reply with ONLY the phrase, no punctuation.")
+    t = _llm_run(p, 20)
+    if not t:
+        return None
+    return _short(t.strip().strip('".\'').lower(), 44)
 
 
 def _keyword_from_text(text):
@@ -601,8 +623,7 @@ def _show_status(sid, cwd, working, detail=None):
     name   = st.get("label") or (os.path.basename(str(cwd).rstrip("/\\")) if cwd else "Claude")
     branch = st.get("branch") or ""
     if working:
-        task = _short(detail, 90) if detail else ""      # the actual ask -> a specific description
-        body = task or (f"working · {branch}" if branch and branch not in ("main", "master") else "working…")
+        body = detail or (f"working · {branch}" if branch and branch not in ("main", "master") else "working…")
         dur  = 900000                                    # stays up through the turn; replaced on stop
     else:
         body = "done"
@@ -641,7 +662,7 @@ def main():
     tp  = data.get("transcript_path")
     if ev == "UserPromptSubmit":
         touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp)
-        _show_status(sid, cwd, working=True, detail=data.get("prompt"))   # top-right: the actual task
+        _show_status(sid, cwd, working=True, detail=_action_phrase(data.get("prompt")))  # a short "what it's doing"
     elif ev == "SessionStart":
         touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
     elif ev == "Stop":

@@ -4,7 +4,7 @@
       { "hooks": [ { "type": "command", "command": "python", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hal_badge.py"], "async": true, "timeout": 20 } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hal_badge.py"], "async": true, "timeout": 20 } ] }
+      { "hooks": [ { "type": "command", "command": "python", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hal_badge.py"], "async": true, "timeout": 45 } ] }
     ],
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hal_badge.py"], "async": true, "timeout": 20 } ] }
