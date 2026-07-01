@@ -73,7 +73,21 @@ cd Claude-Code-Session-HUD
 (For dev iteration: `claude --plugin-dir C:\path\to\Claude-Code-Session-HUD\plugins\hal-voice`.)
 
 Needs a `python` on PATH for the hooks (no third-party packages). Reload Claude Code so the
-hooks load. Optional: set `OPENAI_API_KEY` for the sharpest chat names.
+hooks load. Tab names work out of the box via your Claude Code login — no API key needed.
+
+## Updating
+
+Plugins don't auto-update from a plain push — Claude Code delivers a new version only when
+the plugin's `version` is bumped, and third-party marketplaces have auto-update **off** by
+default. So to get the latest:
+
+```powershell
+/plugin marketplace update session-hud   # pull the newest version
+/reload-plugins                          # apply it in the current session
+```
+
+Prefer hands-off? Open `/plugin` → **Marketplaces** → select this one → **Enable auto-update**;
+Claude Code will then refresh it at startup and prompt you to reload when there's a new version.
 
 ## Config (`~/.claude/hal_voice/config.json`)
 
