@@ -76,8 +76,7 @@ def _git_branch(cwd):
 
 
 def _foreground_hwnd():
-    """The focused window ONLY if it's a VS Code window, so a chat's badge never binds to a
-    browser/other app that happened to be focused when the async hook ran. 0 otherwise."""
+    """The focused window ONLY if it's a VS Code window. Fallback for _find_chat_window."""
     try:
         import ctypes
         u = ctypes.windll.user32
@@ -87,8 +86,41 @@ def _foreground_hwnd():
         n = u.GetWindowTextLengthW(h)
         buf = ctypes.create_unicode_buffer(n + 1)
         u.GetWindowTextW(h, buf, n + 1)
-        title = (buf.value or "").rstrip()
-        return int(h) if title.endswith("Visual Studio Code") else 0
+        return int(h) if (buf.value or "").rstrip().endswith("Visual Studio Code") else 0
+    except Exception:
+        return 0
+
+
+def _find_chat_window(cwd):
+    """The VS Code window whose title contains this chat's project folder - a far more
+    reliable 'which window is this chat in' than whatever was foreground when the async
+    hook ran (which mis-binds when several windows are open)."""
+    proj = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
+    if not proj:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        match = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _cb(h, _l):
+            if not u.IsWindowVisible(h):
+                return True
+            n = u.GetWindowTextLengthW(h)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u.GetWindowTextW(h, buf, n + 1)
+            t = buf.value or ""
+            if t.endswith("Visual Studio Code") and proj in t:
+                match.append(int(h))
+                return False
+            return True
+
+        u.EnumWindows(_cb, 0)
+        return match[0] if match else 0
     except Exception:
         return 0
 
@@ -311,8 +343,10 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     prev = _read_state(session_id)
     r, g, b = hc.session_color(session_id)
     if capture_hwnd:
-        fg = _foreground_hwnd()                       # 0 unless a VS Code window is focused
-        hwnd = fg if fg else int(prev.get("hwnd") or 0)   # keep the last good one otherwise
+        # Match this chat's project to its VS Code window (reliable); fall back to the focused
+        # VS Code window, then to the last good handle.
+        h = _find_chat_window(cwd) or _foreground_hwnd()
+        hwnd = h if h else int(prev.get("hwnd") or 0)
     else:
         hwnd = int(prev.get("hwnd") or 0)
 
