@@ -37,7 +37,7 @@ if ($st) {
 
 $GLOW=12; $R_CORNER=5; $PAD_L=12; $PAD_R=12; $BAR_W=6; $DOTSZ=7
 $hFont   = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$tipFont = New-Object System.Drawing.Font("Segoe UI", 7.5)
+$tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
 # The chip text: what it's waiting on (when awaiting input), else the topic + its branch.
 function DisplayText {
@@ -115,7 +115,7 @@ $render = {
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
     $g.Clear([System.Drawing.Color]::Transparent)
 
     # subtle glow (top/right/bottom), left kept crisp
@@ -173,19 +173,19 @@ $render = {
 
     # Hover hint: a small how-to-interact chip to the LEFT of the tab (only on real mouse hover).
     if ($script:hover) {
-        $tip = "Left-click: jump     Right-click: hide"
+        $tip = "Left-click: jump      Right-click: hide"
         $tw  = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
-        $tbw = $tw + 14; $tbh = 18
+        $tbw = $tw + 18; $tbh = [int]$tipFont.Height + 8
         $tbx = $cx - 8 - $tbw
         if ($tbx -lt 2) { $tbx = 2 }
         $tby = $GLOW + [int](($script:CH - $tbh)/2)
-        $tpath = RoundedPath $tbx $tby $tbw $tbh 4
-        $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(238, 22, 22, 24))
+        $tpath = RoundedPath $tbx $tby $tbw $tbh 5
+        $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246, 26, 26, 28))
         $g.FillPath($tbg, $tpath); $tbg.Dispose()
-        $tpen = New-Object System.Drawing.Pen((CA 110 $accent), 1)
+        $tpen = New-Object System.Drawing.Pen((CA 120 $accent), 1)
         $g.DrawPath($tpen, $tpath); $tpen.Dispose(); $tpath.Dispose()
-        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(214,214,218))
-        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 7), [float]($tby + 3)); $ttb.Dispose()
+        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(237,237,241))
+        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 9), [float]($tby + 4)); $ttb.Dispose()
     }
 
     $g.Dispose()

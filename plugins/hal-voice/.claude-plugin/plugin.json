@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "claude-session-hud",
   "displayName": "Claude Session HUD",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "An ambient heads-up display for running many Claude Code sessions at once. Each session gets a persistent, distinctly-colored badge showing its live state (working / done / awaiting your input) and a Claude-generated name of what it's working on. When a background session needs you, an always-on-top popup pushes it to you (native desktop notification off-Windows); click a badge to jump to that session's window, and the focused window gets a matching color accent. Badges/tint/popup are Windows; notifications are cross-platform.",
   "author": { "name": "Braxton Herold" },
   "repository": "https://github.com/Tchurkin/Claude-Code-Session-HUD",

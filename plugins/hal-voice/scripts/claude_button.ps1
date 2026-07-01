@@ -20,7 +20,7 @@ $TIP_W = 150                                                 # room to the LEFT 
 $OX = $TIP_W                                                 # button x-origin inside the (wider) canvas
 $ACCENT = [System.Drawing.Color]::FromArgb(217, 119, 87)     # Claude clay/orange
 $FORM_W = $CW + $GLOW*2 + $TIP_W; $FORM_H = $CH + $GLOW*2
-$tipFont = New-Object System.Drawing.Font("Segoe UI", 8)
+$tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
 $script:hot = $false; $script:closeReq = $false; $script:tick = 0
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
@@ -69,6 +69,7 @@ $render = {
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
     $g.Clear([System.Drawing.Color]::Transparent)
 
     $gbase = if ($script:hot) { 170 } else { 120 }
@@ -114,8 +115,8 @@ $render = {
         $g.FillPath($tbg, $tpath); $tbg.Dispose()
         $tpen = New-Object System.Drawing.Pen((CA 150 $acc), 1)
         $g.DrawPath($tpen, $tpath); $tpen.Dispose(); $tpath.Dispose()
-        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(224,214,210))
-        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 8), [float]($tby + 4)); $ttb.Dispose()
+        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(240,236,234))
+        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 9), [float]($tby + 4)); $ttb.Dispose()
     }
 
     $g.Dispose()
