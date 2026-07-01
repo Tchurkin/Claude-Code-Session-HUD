@@ -1,21 +1,21 @@
-# hal-voice (Claude Code plugin)
+# claude-session-hud (Claude Code plugin)
 
-HAL 9000 speaks when Claude finishes a response, with live F5-TTS synthesis on a GPU and
-a pre-rendered, git-shared voice pool as fallback. See the [repo README](../../README.md)
-for full install, architecture, and config.
+An ambient HUD for running multiple Claude Code sessions at once: a per-chat colored badge
+with live state (working / done / awaiting input) and an LLM-summarized name, a color
+accent on the focused chat's VS Code window, and a new-chat-in-new-window button. Click a
+badge to jump to that chat. See the [repo README](../../README.md) for the full picture.
 
 ## Layout
-- `hooks/hooks.json` — `Stop` (announcer), `Notification` (awaiting-input voice),
-  `PreToolUse`/`PostToolUse` (status popups + failure tracking).
-- `scripts/` — `hal_announce.py` (Stop), `notify.py` (Notification), `hal_tts_f5.py`
-  (F5 synth + warm daemon), `hal_common.py` (shared helpers), `hal_lines.py` (the
-  fail/wait line texts), `hal_mute.py`, `hal_setup.py`, `hal_add_line.py`,
-  `hal_pool_sync.py`, `render_pool_gpu.py`, the PowerShell popups + `play_audio.ps1`.
-- `reference/` — voice clone reference (wav + transcript) and the RNNoise model.
-- `hal_pool/` — the shared pool (mp3s + `manifest.json`); the writable copy lives in your
-  git clone and is synced across devices.
+- `hooks/hooks.json` — every hook event routes to one dispatcher, `scripts/hal_badge.py`.
+- `scripts/`
+  - `hal_badge.py` — the dispatcher + badge controller (state, LLM naming, spawns the helpers).
+  - `badge.ps1` — the per-chat badge windows (color, state indicator, click-to-focus, stacking).
+  - `hal_tint.ps1` — the focused-window color accent overlay.
+  - `claude_button.ps1` — the always-on-top "new chat in a new window" button.
+  - `popup_common.ps1` — shared layered-window / Win32 helpers.
+  - `hal_common.py` — paths, config, per-chat colors.
 
-## Commands
-`/hal-setup`, `/hal-say <line>`, `/hal-sync`, `/hal-mute`, `/hal-unmute`.
+## Config
+`~/.claude/hal_voice/config.json`: `badge`, `window_tint`, `button` (all default true).
 
-Runtime config: `~/.claude/hal_voice/config.json` (written by `hal_setup.py`).
+Windows-only today (WPF/Win32 UI).

@@ -348,16 +348,28 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
 
 
 def main():
-    # Hook entry for SessionStart / UserPromptSubmit: the user is on this chat now, so this
-    # is the right moment to record its window handle and refresh the "working on" label.
+    # Single hook entry point for every event. Maps the event to a badge state; captures
+    # the window handle + refreshes the "working on" label at the moments the user is here.
     try:
         data = json.loads(sys.stdin.read().lstrip("﻿"))
     except Exception:
         return
-    ev = data.get("hook_event_name", "")
-    state = "working" if ev == "UserPromptSubmit" else "done"
-    touch(data.get("session_id"), data.get("cwd"), capture_hwnd=True,
-          state=state, transcript_path=data.get("transcript_path"))
+    ev  = data.get("hook_event_name", "")
+    sid = data.get("session_id")
+    cwd = data.get("cwd")
+    tp  = data.get("transcript_path")
+    if ev == "UserPromptSubmit":
+        touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp)
+    elif ev == "SessionStart":
+        touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
+    elif ev == "Stop":
+        touch(sid, cwd, state="done", transcript_path=tp)   # response finished
+    elif ev == "Notification":
+        touch(sid, cwd, state="waiting")                    # awaiting your input/permission
+    elif ev in ("PreToolUse", "PostToolUse"):
+        touch(sid, cwd, state="working")                    # keeps the badge/helpers fresh
+    else:
+        touch(sid, cwd)
 
 
 if __name__ == "__main__":

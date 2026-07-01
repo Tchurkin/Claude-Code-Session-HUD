@@ -1,11 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
-  "name": "hal-voice",
-  "displayName": "HAL 9000 Voice",
-  "version": "0.3.0",
-  "description": "HAL 9000 speaks when Claude finishes (triumphant on success, ominous on failure) and when it needs your input, plus status/completion popups and a /hal-mute toggle. Synthesizes tailored lines live with F5-TTS on a GPU machine, falls back to a pre-rendered voice pool that is shared across your devices via git.",
+  "name": "claude-session-hud",
+  "displayName": "Claude Session HUD",
+  "version": "0.4.0",
+  "description": "An ambient heads-up display for running many Claude Code sessions at once. Each chat gets a persistent colored badge showing its live state (working / done / awaiting your input) and an LLM-summarized name of what it's working on; the focused chat's VS Code window gets a matching color accent; a button opens a new chat in a new window; click a badge to jump to that chat. Windows.",
   "author": { "name": "Braxton Herold" },
   "repository": "https://github.com/Tchurkin/hal-voice-bundle",
   "license": "MIT",
-  "keywords": ["hal", "9000", "tts", "voice", "f5-tts", "notifications", "hooks", "windows"]
+  "keywords": ["claude-code", "hud", "hooks", "multi-session", "parallel-agents", "worktrees", "notifications", "windows"]
 }

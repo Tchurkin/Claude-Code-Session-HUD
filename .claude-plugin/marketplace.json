@@ -1,12 +1,12 @@
 {
-  "name": "hal-bundle",
+  "name": "session-hud",
   "owner": { "name": "Braxton Herold" },
-  "description": "HAL 9000 voice + UX plugin for Claude Code.",
+  "description": "Ambient HUD for running multiple Claude Code sessions at once.",
   "plugins": [
     {
-      "name": "hal-voice",
+      "name": "claude-session-hud",
       "source": "./plugins/hal-voice",
-      "description": "HAL 9000 voice announcements + status popups, with live F5-TTS synthesis and a git-shared voice pool."
+      "description": "Per-chat state badges, window color-coding, and one-click new-window — see and steer all your parallel Claude Code sessions at a glance."
     }
   ]
 }

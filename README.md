@@ -1,124 +1,82 @@
-# HAL 9000 voice — a Claude Code plugin
+# Claude Session HUD
 
-A UX layer for **Claude Code on Windows**: HAL 9000 speaks when a response finishes,
-plus on-screen status/completion popups while Claude works. It is a real Claude Code
-**plugin** (`plugins/hal-voice`), distributed from this repo's marketplace.
+**An ambient heads-up display for running many Claude Code sessions at once.**
 
-Two ways HAL gets a line to say, decided at runtime:
+When you've got several Claude Code chats going in parallel, you lose track of which one
+is which, which is still working, and — the big one — **which one is blocked waiting for
+you**. This is a lightweight, hook-based HUD that answers that at a glance, layered over
+the sessions you already run. No new app, no orchestrator, no worktree management: it just
+watches Claude Code's hooks and draws a small always-on-top UI.
 
-1. **Live synthesis** — on a machine with an NVIDIA GPU and the F5-TTS venv, a warm
-   daemon synthesizes a *tailored* line in HAL's cloned voice (Douglas Rain) in a few
-   seconds. The announcer waits a short budget for it.
-2. **Pre-rendered pool** — if synthesis would take too long (no GPU, or the daemon is
-   still warming up), HAL immediately plays the best-fitting line from a pre-rendered
-   **pool**. Any line synthesized live is appended to that pool, and the pool is
-   **shared across your devices over git**, so every device can pick from it.
+> A real Claude Code **plugin** (`plugins/hal-voice`), distributed from this repo's
+> marketplace. **Windows-only today** (the UI is WPF/Win32).
 
-> The voice is a local clone — no audio leaves your machine. The only network call is an
-> optional Claude API request that picks which pool line best fits what Claude just did
-> (it degrades to a random fit if `anthropic` / `ANTHROPIC_API_KEY` isn't present).
+## What you get
+
+| Feature | What it does |
+|---|---|
+| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's own color. |
+| **Live state** | The badge shows **✓ done**, a **breathing dot = working**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal. |
+| **Smart name** | The badge is labelled with a 1–3 word summary of what the chat has been working on (from the transcript, via an LLM), not just the folder name. |
+| **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to dismiss it. |
+| **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
+| **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |
+
+Badges stack, so several chats form a tidy dock; the button rides on top of the stack.
 
 ## How it works
 
-| Hook | Script | What |
-|---|---|---|
-| `Stop` | `hal_announce.py` | Pick the best pool line (LLM, optional) in the right **tone** — triumphant on success, ominous if the turn ended on a failure; if a tailored line fits better and this machine can synth live, wait up to `synth_budget_ms` for the daemon, else play the pool line now and let the daemon finish the new one into the pool. Then show the completion popup + speak. |
-| `Notification` | `notify.py` | HAL speaks an "awaiting input" line when Claude needs you (permission prompt / idle). Debounced so a burst of prompts doesn't talk over itself. |
-| `PreToolUse` (Bash) | `pre_tool_status.py` | Loading status popup before long commands ("RUNNING SIMULATION", …). |
-| `PostToolUse` (Bash/Write/Edit/NotebookEdit) | `track_action.py` | Record what Claude is doing (drives the Stop-hook context), note whether the last tool result failed (drives the Stop-hook tone), + status popup. |
+Everything is driven by Claude Code **hooks** → one dispatcher (`scripts/hal_badge.py`):
 
-**Line kinds.** Each pool line carries an optional `kind`: absent/`done` = a completed task, `fail` = something went wrong, `wait` = Claude is awaiting input. The Stop hook draws from `done`/`fail` depending on how the turn ended; the Notification hook draws from `wait`. On a GPU machine, the first time a `fail`/`wait` line is needed it's synthesized live and added to the pool (then shared via `/hal-sync`); on pool-only machines the `fail`/`wait` sets appear once you render them (see below) and pull them.
+- `SessionStart` / `UserPromptSubmit` → mark the chat, capture its window, refresh its name
+- `PreToolUse` / `PostToolUse` → keep the badge and helpers alive while it works
+- `Notification` → mark the chat **awaiting input**
+- `Stop` → mark the chat **done**
 
-Supporting pieces (all under `plugins/hal-voice/scripts/`):
+The dispatcher writes tiny per-chat state files under `~/.claude/hal_voice/`. Three small
+always-on-top helpers render from that state and clean themselves up:
+`badge.ps1` (the badges), `hal_tint.ps1` (the window accent), `claude_button.ps1` (the
+button). Shared Win32/layered-window helpers live in `scripts/popup_common.ps1`.
 
-- `hal_tts_f5.py` — F5-TTS synthesis **and** a warm daemon (loads the ~1.3 GB model once,
-  serves single-line requests over `127.0.0.1`, self-exits when idle). The announcer talks
-  to it with a tiny socket client, so the announcer itself needs no ML stack.
-- `hal_common.py` — portable paths, config, the pool/manifest, durations, and
-  dependency-free audio playback (`play_audio.ps1`, WPF MediaPlayer — no ffplay needed).
-- `hal_setup.py` — write this machine's config (detect GPU + venv).
-- `hal_add_line.py` — synthesize one line into the pool (`/hal-say`).
-- `hal_pool_sync.py` — git pull/merge/push the pool across devices (`/hal-sync`).
-- `render_pool_gpu.py` — bulk-(re)render the base pool on a GPU.
-
-Machine-local state lives in `~/.claude/hal_voice/` (config + scratch). The pool, the voice
-reference, and the venv live in your **git clone** of this repo and are located via config —
-because an installed plugin is a read-only cached copy, not a git working tree.
+The name summary uses an LLM: it reads `OPENAI_API_KEY` (or `~/.claude/.openai_key`), or
+falls back to `ANTHROPIC_API_KEY`, and degrades to a keyword theme if neither is present.
 
 ## Install
 
-### 1. Clone this repo (it is both the plugin source and the shared pool home)
 ```powershell
 git clone https://github.com/Tchurkin/hal-voice-bundle
 cd hal-voice-bundle
-```
-
-### 2. (GPU machines only) create the F5-TTS venv
-Required for **live synthesis**; skip on consumer machines (they use the pool).
-```powershell
-python -m venv venv
-venv\Scripts\python -m pip install --upgrade pip
-# torch 2.8 avoids the torchcodec audio-load failure on Windows; it is published for
-# cu126 (not cu121). cu126 matches recent NVIDIA drivers (CUDA 12.x).
-venv\Scripts\python -m pip install "torch==2.8.*" "torchaudio==2.8.*" --index-url https://download.pytorch.org/whl/cu126
-venv\Scripts\python -m pip install f5-tts imageio-ffmpeg
-```
-(The base 20-line completion pool is already committed in `plugins/hal-voice/hal_pool/`.
-The `fail`/`wait` line sets ship as text only — run the renderer once on this GPU machine
-to bake them into the pool (and `/hal-sync` to share them):
-`venv\Scripts\python plugins\hal-voice\scripts\render_pool_gpu.py`. The same command
-re-renders everything if you change the lines or the spoken name; set `HAL_NAME` to
-re-target the name. Edit the `fail`/`wait` wording in `scripts/hal_lines.py`.)
-
-### 3. Install the plugin
-```
 /plugin marketplace add C:\path\to\hal-voice-bundle
-/plugin install hal-voice@hal-bundle
+/plugin install claude-session-hud@session-hud
 ```
-(For quick dev iteration you can instead launch with `claude --plugin-dir C:\path\to\hal-voice-bundle\plugins\hal-voice`.)
+(For dev iteration: `claude --plugin-dir C:\path\to\hal-voice-bundle\plugins\hal-voice`.)
 
-### 4. Configure this machine
-```powershell
-# GPU machine (live synth):
-venv\Scripts\python plugins\hal-voice\scripts\hal_setup.py --name Braxton
-# consumer machine (pool only):
-python plugins\hal-voice\scripts\hal_setup.py --name Braxton
-```
-Then reload so the hooks pick everything up: **`/reload-plugins`** (or restart Claude Code).
+Needs a `python` on PATH for the hooks (no third-party packages). Reload Claude Code so the
+hooks load. Optional: set `OPENAI_API_KEY` for the sharpest chat names.
 
-### 5. Optional, for smarter line selection
-`pip install anthropic` and set `ANTHROPIC_API_KEY` for the python that runs the hooks.
-Without it, HAL still speaks — it just picks a fitting pool line at random.
+## Config (`~/.claude/hal_voice/config.json`)
 
-## Commands
-- `/hal-say <line>` — speak a line now (synthesizes + adds to the pool if new).
-- `/hal-sync` — push/pull the pool across your devices over git.
-- `/hal-setup` — (re)configure this machine.
-- `/hal-mute` / `/hal-unmute` — silence HAL (voice + popups) and bring it back. Takes effect immediately; the hooks read the flag live, so no reload is needed.
-
-## Cross-device pool sharing
-New lines land in `plugins/hal-voice/hal_pool/` inside your clone. `/hal-sync`
-(`hal_pool_sync.py`) commits them, `git pull`s other devices' lines, resolves the
-inevitable `manifest.json` overlap by **union** (mp3 filenames are content-hashed, so they
-never collide), and pushes. Other devices run sync (or just `git pull`) to receive them.
-Consumers without push access still pull everyone else's lines.
-
-## Config reference (`~/.claude/hal_voice/config.json`)
 | key | meaning |
 |---|---|
-| `user_name` | name HAL may use in tailored lines |
-| `pool_dir` / `reference_dir` | writable pool / voice reference (your clone; falls back to the bundled copies) |
-| `tts_python` | venv python with f5-tts (enables live synth) |
-| `pool_repo` | git repo root for `/hal-sync` |
-| `gpu` | set by `hal_setup`; live synth requires it (CPU F5 is far too slow) |
-| `live_synth` | master on/off for live synthesis |
-| `muted` | `/hal-mute` sets this; when true HAL stays completely silent (voice + popups) |
-| `synth_budget_ms` | how long the announcer waits for a live line before using the pool (default 6000) |
-| `daemon_port` / `daemon_idle_s` | warm-daemon socket port / idle self-exit |
+| `badge` | show the per-chat badges (default true) |
+| `window_tint` | color-accent the focused chat window (default true) |
+| `button` | show the new-window button (default true) |
+
+## Limitations & roadmap
+
+- **Windows-only** right now. macOS/Linux is the biggest thing that would broaden it.
+- **Click-to-jump / window accent are VS Code + Windows specific** (they use window
+  handles). The core state HUD (which chat is working / done / waiting) is universal and
+  is the part worth generalizing first.
+- The **"awaiting input"** signal is the highest-value piece — it maps to open Claude Code
+  feature requests for knowing which parallel session is blocked.
+
+PRs / issues welcome — especially cross-platform rendering and better "waiting for input"
+detection.
 
 ## Notes
-- **Windows-only** today (PowerShell popups + audio). The synthesis/pool/sync logic is
-  cross-platform; only the popups and player are Windows-specific.
-- **No ffplay/ffprobe needed** at runtime — playback uses WPF MediaPlayer and clip
-  durations are stored in the manifest.
-- **Secrets** are never committed (`.gitignore` covers `*.key` / `.openai_key`).
+
+- The plugin folder is still named `hal-voice` (this started life as a HAL-9000 voice
+  notifier); the voice half has been removed. Renaming the folder/repo is a cosmetic
+  follow-up (update the hook paths in `~/.claude/settings.json` if you do).
+- MIT licensed.

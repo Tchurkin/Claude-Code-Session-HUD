@@ -1,11 +1,12 @@
-# Shared by popup.ps1 (completion) and status_popup.ps1 (status).
+# Shared Win32 / layered-window helpers for the HUD windows (badge.ps1, hal_tint.ps1,
+# claude_button.ps1).
 #
-# 1. PerPixelLayered - the per-pixel-alpha layered-window helper (true transparency + glow).
-# 2. A tiny cross-process "stack" registry so popups from multiple chats don't overlap:
-#    every popup heartbeats {id, ts, h} into one JSON file; each popup reads it every frame
-#    and slots itself by birth time - newest on top, older ones pushed down. When a popup
-#    fades, the others slide back up. State is best-effort (each popup re-asserts itself
-#    every beat, so a lost write self-heals on the next frame).
+# 1. PerPixelLayered - the per-pixel-alpha layered-window helper (true transparency + glow),
+#    plus window helpers (move, focus, find/rect a window, click-through, no-activate).
+# 2. A tiny cross-process "stack" registry so windows from multiple chats don't overlap:
+#    each heartbeats {id, ts, h} into per-window files; each reads them every frame and
+#    slots itself by birth time - newest at the anchor, older pushed away. Best-effort
+#    (each re-asserts itself every beat, so a lost write self-heals on the next frame).
 
 # ── per-pixel-alpha layered window ─────────────────────────────────────────────
 $src = @"
