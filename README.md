@@ -14,7 +14,7 @@ the sessions you already run. No new app, no orchestrator, no worktree managemen
 watches Claude Code's hooks and draws a small always-on-top UI.
 
 <p align="center">
-  <img src="assets/badge-dock.svg" alt="A dock of per-session badges bottom-right — one working (green), one awaiting your input (amber), one done (cyan) — with a desktop toast pushing the awaiting-input session to you." width="520">
+  <img src="assets/badge-dock.svg" alt="A dock of per-session badges bottom-right, each in its own color — Servos Impulse Board (done, purple), Landing Animation (working, yellow), Session HUD (done, cyan) — with the new-window button riding above the stack." width="520">
 </p>
 
 > A real Claude Code **plugin**, distributed from this repo's marketplace. The **badges,
