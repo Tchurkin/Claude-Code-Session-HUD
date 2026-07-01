@@ -22,9 +22,12 @@ Two ways HAL gets a line to say, decided at runtime:
 
 | Hook | Script | What |
 |---|---|---|
-| `Stop` | `hal_announce.py` | Pick the best pool line (LLM, optional); if a tailored line fits better and this machine can synth live, wait up to `synth_budget_ms` for the daemon, else play the pool line now and let the daemon finish the new one into the pool. Then show the completion popup + speak. |
+| `Stop` | `hal_announce.py` | Pick the best pool line (LLM, optional) in the right **tone** — triumphant on success, ominous if the turn ended on a failure; if a tailored line fits better and this machine can synth live, wait up to `synth_budget_ms` for the daemon, else play the pool line now and let the daemon finish the new one into the pool. Then show the completion popup + speak. |
+| `Notification` | `notify.py` | HAL speaks an "awaiting input" line when Claude needs you (permission prompt / idle). Debounced so a burst of prompts doesn't talk over itself. |
 | `PreToolUse` (Bash) | `pre_tool_status.py` | Loading status popup before long commands ("RUNNING SIMULATION", …). |
-| `PostToolUse` (Bash/Write/Edit/NotebookEdit) | `track_action.py` | Record what Claude is doing (drives the Stop-hook context) + status popup. |
+| `PostToolUse` (Bash/Write/Edit/NotebookEdit) | `track_action.py` | Record what Claude is doing (drives the Stop-hook context), note whether the last tool result failed (drives the Stop-hook tone), + status popup. |
+
+**Line kinds.** Each pool line carries an optional `kind`: absent/`done` = a completed task, `fail` = something went wrong, `wait` = Claude is awaiting input. The Stop hook draws from `done`/`fail` depending on how the turn ended; the Notification hook draws from `wait`. On a GPU machine, the first time a `fail`/`wait` line is needed it's synthesized live and added to the pool (then shared via `/hal-sync`); on pool-only machines the `fail`/`wait` sets appear once you render them (see below) and pull them.
 
 Supporting pieces (all under `plugins/hal-voice/scripts/`):
 
@@ -60,10 +63,12 @@ venv\Scripts\python -m pip install --upgrade pip
 venv\Scripts\python -m pip install "torch==2.8.*" "torchaudio==2.8.*" --index-url https://download.pytorch.org/whl/cu126
 venv\Scripts\python -m pip install f5-tts imageio-ffmpeg
 ```
-(The base 20-line pool is already committed in `plugins/hal-voice/hal_pool/`. To
-re-render it — e.g. to change the lines or the spoken name — run
-`venv\Scripts\python plugins\hal-voice\scripts\render_pool_gpu.py`; set `HAL_NAME` to
-re-target the name.)
+(The base 20-line completion pool is already committed in `plugins/hal-voice/hal_pool/`.
+The `fail`/`wait` line sets ship as text only — run the renderer once on this GPU machine
+to bake them into the pool (and `/hal-sync` to share them):
+`venv\Scripts\python plugins\hal-voice\scripts\render_pool_gpu.py`. The same command
+re-renders everything if you change the lines or the spoken name; set `HAL_NAME` to
+re-target the name. Edit the `fail`/`wait` wording in `scripts/hal_lines.py`.)
 
 ### 3. Install the plugin
 ```
@@ -89,6 +94,7 @@ Without it, HAL still speaks — it just picks a fitting pool line at random.
 - `/hal-say <line>` — speak a line now (synthesizes + adds to the pool if new).
 - `/hal-sync` — push/pull the pool across your devices over git.
 - `/hal-setup` — (re)configure this machine.
+- `/hal-mute` / `/hal-unmute` — silence HAL (voice + popups) and bring it back. Takes effect immediately; the hooks read the flag live, so no reload is needed.
 
 ## Cross-device pool sharing
 New lines land in `plugins/hal-voice/hal_pool/` inside your clone. `/hal-sync`
@@ -106,6 +112,7 @@ Consumers without push access still pull everyone else's lines.
 | `pool_repo` | git repo root for `/hal-sync` |
 | `gpu` | set by `hal_setup`; live synth requires it (CPU F5 is far too slow) |
 | `live_synth` | master on/off for live synthesis |
+| `muted` | `/hal-mute` sets this; when true HAL stays completely silent (voice + popups) |
 | `synth_budget_ms` | how long the announcer waits for a live line before using the pool (default 6000) |
 | `daemon_port` / `daemon_idle_s` | warm-daemon socket port / idle self-exit |
 

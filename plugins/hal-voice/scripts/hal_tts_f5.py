@@ -85,8 +85,9 @@ def synthesize_to(text, out_path, cfg=None):
         except Exception: pass
 
 
-def synth_and_pool(text, cfg=None):
-    """Synthesize `text` into the pool (idempotent). Returns (path, dur_ms) or (None, None)."""
+def synth_and_pool(text, cfg=None, kind=None):
+    """Synthesize `text` into the pool (idempotent). Returns (path, dur_ms) or (None, None).
+    `kind` ('fail'/'wait') tags the new line so it's only reused for that moment."""
     cfg = cfg or hc.load_config()
     pdir = hc.pool_dir(cfg)
     existing = hc.find_entry(text, pdir)
@@ -100,7 +101,7 @@ def synth_and_pool(text, cfg=None):
             return None, None
     else:
         dur = _duration_ms(hc.find_ffmpeg(), out)
-    hc.append_pool_entry(text, fname, dur, pdir)
+    hc.append_pool_entry(text, fname, dur, pdir, kind=kind)
     return out, dur
 
 
@@ -145,7 +146,8 @@ def _serve(cfg):
                     reply = {"pong": True}
                 else:
                     text = (req.get("text") or "").strip()
-                    path, dur = (synth_and_pool(text, cfg) if text else (None, None))
+                    kind = req.get("kind")
+                    path, dur = (synth_and_pool(text, cfg, kind=kind) if text else (None, None))
                     reply = ({"ok": True, "file": os.path.basename(path), "dur_ms": dur}
                              if path else {"ok": False, "error": "synth failed"})
                 conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
@@ -191,12 +193,13 @@ def ensure_daemon(cfg=None):
     return False  # just launched; caller treats this attempt as "warming up"
 
 
-def request_synth(text, budget_ms, cfg=None, allow_cold_wait=False):
+def request_synth(text, budget_ms, cfg=None, allow_cold_wait=False, kind=None):
     """Ask the daemon to synthesize `text`. Returns (path, dur_ms) if ready within
     budget_ms, else (None, None) - in which case the daemon keeps going and the line
     lands in the pool for next time (the request stays buffered for the daemon to read
     even if we disconnect first).
 
+    `kind` ('fail'/'wait') tags the line in the pool so it's reused only for that moment.
     allow_cold_wait=True (used by manual /hal-say) keeps waiting through a cold model
     load instead of giving up after ~1.5 s."""
     cfg = cfg or hc.load_config()
@@ -221,7 +224,7 @@ def request_synth(text, budget_ms, cfg=None, allow_cold_wait=False):
                 return None, None
             time.sleep(0.3)
     try:
-        conn.sendall((json.dumps({"cmd": "synth", "text": text}) + "\n").encode("utf-8"))
+        conn.sendall((json.dumps({"cmd": "synth", "text": text, "kind": kind}) + "\n").encode("utf-8"))
         conn.settimeout(max(0.5, deadline - time.time()))
         reply = json.loads(conn.recv(1024).decode("utf-8") or "{}")
         if reply.get("ok") and os.path.exists(out) and os.path.getsize(out) > 0:

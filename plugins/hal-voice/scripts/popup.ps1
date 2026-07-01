@@ -1,52 +1,21 @@
 param(
     [string]$Text = "PROJECT DOMINATED!!",
-    [int]$DurationMs = 4500
+    [int]$DurationMs = 4500,
+    [int]$AccentR = 0,
+    [int]$AccentG = 215,
+    [int]$AccentB = 80
 )
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# ── Per-pixel-alpha layered window helper (true transparency + glow) ───────────
-$src = @"
-using System;
-using System.Drawing;
-using System.Runtime.InteropServices;
-public class PerPixelLayered {
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; public POINT(int x,int y){X=x;Y=y;} }
-    [StructLayout(LayoutKind.Sequential)] public struct SIZE  { public int cx, cy; public SIZE(int x,int y){cx=x;cy=y;} }
-    [StructLayout(LayoutKind.Sequential, Pack=1)] public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
-    [DllImport("user32.dll", SetLastError=true)] static extern int GetWindowLong(IntPtr h, int i);
-    [DllImport("user32.dll", SetLastError=true)] static extern int SetWindowLong(IntPtr h, int i, int v);
-    [DllImport("user32.dll", SetLastError=true)] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst, ref POINT pdst, ref SIZE ps, IntPtr src, ref POINT psrc, int key, ref BLENDFUNCTION bf, int flags);
-    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
-    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
-    [DllImport("gdi32.dll")]  static extern IntPtr CreateCompatibleDC(IntPtr dc);
-    [DllImport("gdi32.dll")]  static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
-    [DllImport("gdi32.dll")]  static extern bool DeleteDC(IntPtr dc);
-    [DllImport("gdi32.dll")]  static extern bool DeleteObject(IntPtr o);
-    const int GWL_EXSTYLE=-20, WS_EX_LAYERED=0x80000, ULW_ALPHA=2;
-    public static void Init(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED); }
-    public static void SetBitmap(IntPtr h, Bitmap bmp, int left, int top, byte opacity){
-        IntPtr screen=GetDC(IntPtr.Zero), mem=CreateCompatibleDC(screen), hbmp=IntPtr.Zero, old=IntPtr.Zero;
-        try {
-            hbmp=bmp.GetHbitmap(Color.FromArgb(0)); old=SelectObject(mem,hbmp);
-            SIZE s=new SIZE(bmp.Width,bmp.Height); POINT psrc=new POINT(0,0); POINT pdst=new POINT(left,top);
-            BLENDFUNCTION bf=new BLENDFUNCTION(); bf.BlendOp=0; bf.BlendFlags=0; bf.SourceConstantAlpha=opacity; bf.AlphaFormat=1;
-            UpdateLayeredWindow(h,screen,ref pdst,ref s,mem,ref psrc,0,ref bf,ULW_ALPHA);
-        } finally {
-            ReleaseDC(IntPtr.Zero,screen);
-            if(hbmp!=IntPtr.Zero){ SelectObject(mem,old); DeleteObject(hbmp); }
-            DeleteDC(mem);
-        }
-    }
-}
-"@
-try { Add-Type -TypeDefinition $src -ReferencedAssemblies System.Drawing, System.Windows.Forms } catch {}
+# Per-pixel-alpha layered window + cross-process popup-stacking helpers.
+. (Join-Path $PSScriptRoot 'popup_common.ps1')
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
 $CW=440; $R=6; $GLOW=16; $PAD_L=18; $PAD_T=11; $HDR_H=18
-$ACCENT = [System.Drawing.Color]::FromArgb(0, 215, 80)
+$ACCENT = [System.Drawing.Color]::FromArgb($AccentR, $AccentG, $AccentB)
 
 $hdrFont = New-Object System.Drawing.Font("Segoe UI", 8,  [System.Drawing.FontStyle]::Bold)
 $msgFont = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
@@ -85,8 +54,15 @@ $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.Width  = $FORM_W
 $form.Height = $FORM_H
+# Stacking anchor: newest popup sits here; older ones slide below it (see the stack timer).
+$GAP = 8
+$script:baseTop   = $screen.Top + 36 - $GLOW
+$script:curTop    = $script:baseTop
+$script:targetTop = $script:baseTop
+$script:lastTop   = $script:baseTop
+$script:tick      = 0
 $form.Left   = $screen.Right - $CW - 20 - $GLOW
-$form.Top    = $screen.Top + 36 - $GLOW
+$form.Top    = $script:baseTop
 
 $render = {
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -148,7 +124,7 @@ $render = {
 
 function HitClose($x,$y){ ($x -ge ($CXL-7)) -and ($x -le ($CXL+$CS+7)) -and ($y -ge ($CYT-7)) -and ($y -le ($CYT+$CS+7)) }
 
-$form.Add_MouseDown({ param($s,$e) if (HitClose $e.X $e.Y) { $form.Close() } })
+$form.Add_MouseDown({ $form.Close() })   # click anywhere to dismiss
 $form.Add_MouseMove({
     param($s,$e)
     $h = HitClose $e.X $e.Y
@@ -156,9 +132,33 @@ $form.Add_MouseMove({
 })
 $form.Add_Shown({ [PerPixelLayered]::Init($form.Handle); & $render })
 
+# Stacking. The slot only changes when popups appear/disappear, so we hit the shared
+# registry just ~8x/sec; every frame we just ease toward the target and slide the window
+# with a cheap SetWindowPos (no GDI redraw) - that keeps the push-down buttery.
+$stackTimer = New-Object System.Windows.Forms.Timer
+$stackTimer.Interval = 20
+$stackTimer.Add_Tick({
+    $script:tick++
+    if (($script:tick % 6) -eq 1) {
+        $ordered = Stack-Sync $CH $true
+        $script:targetTop = Stack-TargetTop $script:baseTop $GAP $ordered
+    }
+    $delta = $script:targetTop - $script:curTop
+    if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:targetTop } else { $script:curTop += $delta * 0.22 }
+    $newTop = [int]$script:curTop
+    if ($newTop -ne $script:lastTop) {
+        $script:lastTop = $newTop
+        $form.Top = $newTop
+        [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
+    }
+})
+$stackTimer.Start()
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $DurationMs
 $timer.Add_Tick({ $form.Close() })
 $timer.Start()
+
+$form.Add_FormClosed({ try { Stack-Sync $CH $false } catch {} })
 
 [System.Windows.Forms.Application]::Run($form)

@@ -22,7 +22,6 @@ HOME        = os.path.expanduser("~")
 DATA_DIR    = os.path.join(HOME, ".claude", "hal_voice")          # config + scratch
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 ACTION_FILE = os.path.join(DATA_DIR, "last_action.json")
-STATUS_PID  = os.path.join(DATA_DIR, "status_popup.pid")
 DAEMON_PID  = os.path.join(DATA_DIR, "tts_daemon.pid")
 
 AUTO_PREFIX = "hal_auto_"          # filenames for hook-synthesized (non-base) lines
@@ -47,10 +46,47 @@ _DEFAULTS = {
     "pool_repo":       None,     # git repo root for cross-device sync
     "gpu":             False,    # set by hal_setup; CPU F5 is far too slow to be "live"
     "live_synth":      True,     # master switch for attempting live synthesis
+    "muted":           False,    # /hal-mute: silence HAL (voice + popups) without uninstalling
+    "badge":           True,     # persistent per-chat color badge window (bottom-right)
+    "window_tint":     True,     # colored accent bar on the focused chat's VS Code window
+    "button":          True,     # always-on-top Claude spark button (new chat in new window)
     "synth_budget_ms": 6000,     # how long the announcer waits for a live line
     "daemon_port":     53117,    # localhost port for the warm F5 synth daemon
     "daemon_idle_s":   900,      # daemon self-exits after this many idle seconds
 }
+
+# Line "kind": which moment a pool line is for. Absent/"done" = a completed task (the
+# original behaviour); "fail" = something went wrong; "wait" = Claude is awaiting input.
+KINDS = ("done", "fail", "wait")
+
+# Per-chat popup colors. Each Claude session maps (by hashing its id) to one vivid accent,
+# so two chats open at once are easy to tell apart. All chosen to read well on the popups'
+# near-black fill. FAIL_COLOR overrides the chat color so failures always look like failures.
+SESSION_PALETTE = [
+    (0, 215, 80),     # green (the original)
+    (0, 200, 255),    # cyan
+    (255, 176, 0),    # amber
+    (235, 70, 200),   # magenta
+    (170, 110, 255),  # purple
+    (70, 150, 255),   # blue
+    (0, 205, 170),    # teal
+    (255, 120, 40),   # orange
+    (140, 220, 0),    # lime
+    (255, 105, 160),  # pink
+    (90, 190, 255),   # sky
+    (210, 190, 40),   # gold
+    (120, 230, 160),  # mint
+    (200, 120, 255),  # violet
+]
+FAIL_COLOR = (240, 80, 70)   # error red
+
+
+def session_color(session_id):
+    """Stable vivid accent for a chat session (same chat -> same color every time)."""
+    if not session_id:
+        return SESSION_PALETTE[0]
+    h = int(hashlib.md5(str(session_id).encode("utf-8")).hexdigest(), 16)
+    return SESSION_PALETTE[h % len(SESSION_PALETTE)]
 
 
 def daemon_addr(cfg=None):
@@ -101,6 +137,12 @@ def reference_dir(cfg=None):
     return BUNDLED_REF
 
 
+def is_muted(cfg=None):
+    """True when the user has silenced HAL via /hal-mute (config `muted`)."""
+    cfg = cfg or load_config()
+    return bool(cfg.get("muted"))
+
+
 def can_synth_live(cfg=None):
     """True only when this machine can realistically synthesize a line fast enough to
     be played in-line (configured f5 venv + a GPU + the master switch on)."""
@@ -143,6 +185,18 @@ def entry_duration_ms(entry, default=6000):
         return default
 
 
+def entry_kind(entry):
+    """Normalized line kind; a missing/unknown kind is treated as a completion line."""
+    k = (entry.get("kind") or "done").strip().lower()
+    return k if k in KINDS else "done"
+
+
+def pool_by_kind(entries, kind):
+    """Subset of the pool for a given moment ('done' / 'fail' / 'wait')."""
+    kind = (kind or "done").lower()
+    return [e for e in entries if entry_kind(e) == kind]
+
+
 def auto_filename(text):
     """Deterministic filename for a synthesized line, so callers can predict the path."""
     h = hashlib.md5(text.strip().encode("utf-8")).hexdigest()[:10]
@@ -157,7 +211,7 @@ def find_entry(text, pdir=None):
     return None
 
 
-def append_pool_entry(text, file, dur_ms, pdir=None):
+def append_pool_entry(text, file, dur_ms, pdir=None, kind=None):
     """Idempotently add a line to the manifest (atomic re-read + replace; race-tolerant)."""
     pdir = pdir or pool_dir()
     try:
@@ -167,7 +221,10 @@ def append_pool_entry(text, file, dur_ms, pdir=None):
     t = text.strip().lower()
     if any(e.get("file") == file or e.get("text", "").strip().lower() == t for e in cur):
         return False
-    cur.append({"file": file, "text": text.strip(), "dur_ms": int(dur_ms)})
+    entry = {"file": file, "text": text.strip(), "dur_ms": int(dur_ms)}
+    if kind and str(kind).lower() in ("fail", "wait"):   # 'done' is the implicit default
+        entry["kind"] = str(kind).lower()
+    cur.append(entry)
     save_pool(cur, pdir)
     return True
 
@@ -202,45 +259,61 @@ def play_audio(path, wait=True, timeout=30):
         pass
 
 
-def show_completion_popup(text, duration_ms):
+def _accent_args(accent):
+    r, g, b = accent or SESSION_PALETTE[0]
+    return ["-AccentR", str(int(r)), "-AccentG", str(int(g)), "-AccentB", str(int(b))]
+
+
+def show_completion_popup(text, duration_ms, accent=None):
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", POPUP_PS1, "-Text", text, "-DurationMs", str(int(duration_ms))],
+             "-File", POPUP_PS1, "-Text", text, "-DurationMs", str(int(duration_ms))]
+            + _accent_args(accent),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=CREATE_NO_WINDOW)
     except Exception:
         pass
 
 
-def show_status_popup(text, loading=True, duration_ms=300000):
-    """Replace any visible status popup with a new one; record its PID so it can be killed."""
-    kill_status_popup()
+def status_pid_path(session_id=None):
+    """Per-chat status-popup PID file, so a chat replaces only ITS OWN status popup and
+    leaves other chats' popups alone (they stack instead of clobbering each other)."""
+    sid = "".join(ch for ch in str(session_id)[:8] if ch.isalnum()) if session_id else ""
+    return os.path.join(DATA_DIR, f"status_popup_{sid or 'default'}.pid")
+
+
+def show_status_popup(text, loading=True, duration_ms=300000, accent=None, session_id=None):
+    """Replace this chat's visible status popup with a new one; record its PID to kill later."""
+    pidfile = status_pid_path(session_id)
+    kill_status_popup(session_id)
+    ensure_data_dir()
     args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NonInteractive",
-            "-File", STATUS_PS1, "-Text", text, "-DurationMs", str(int(duration_ms))]
+            "-File", STATUS_PS1, "-Text", text, "-DurationMs", str(int(duration_ms)),
+            "-PidFile", pidfile] + _accent_args(accent)
     if loading:
         args.append("-Loading")
     try:
         p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=CREATE_NO_WINDOW)
-        ensure_data_dir()
-        with open(STATUS_PID, "w") as f:
+        with open(pidfile, "w") as f:
             f.write(str(p.pid))
     except Exception:
         pass
 
 
-def kill_status_popup():
+def kill_status_popup(session_id=None):
+    pidfile = status_pid_path(session_id)
     try:
-        if not os.path.exists(STATUS_PID):
+        if not os.path.exists(pidfile):
             return
-        pid = int(open(STATUS_PID).read().strip())
+        pid = int(open(pidfile).read().strip())
         subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                        capture_output=True, creationflags=CREATE_NO_WINDOW)
     except Exception:
         pass
     finally:
-        try: os.remove(STATUS_PID)
+        try: os.remove(pidfile)
         except Exception: pass
 
 

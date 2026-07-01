@@ -61,6 +61,12 @@ _LINES = [
 ]
 LINES = [ln.replace("Braxton", NAME) for ln in _LINES]
 
+# Failure ('fail') and awaiting-input ('wait') sets live in hal_lines so the runtime can
+# also synthesize them on demand; baking them here makes them instant + shared via git.
+import hal_lines
+FAIL_LINES = hal_lines.for_name(hal_lines.FAIL_LINES, NAME)
+WAIT_LINES = hal_lines.for_name(hal_lines.WAIT_LINES, NAME)
+
 
 def duration_ms(path):
     try:
@@ -81,13 +87,43 @@ def load_manifest():
         return []
 
 
+def render_group(f5, ref_text, lines, fname_fmt, kind, entries, prev):
+    """Render one group of lines into the pool, appending to `entries` and writing the
+    manifest after each line (resumable). Skips a line whose mp3 already exists with the
+    same text (so a re-run is cheap, but changing HAL_NAME re-renders the changed lines)."""
+    for i, text in enumerate(lines, 1):
+        fname = fname_fmt.format(i=i)
+        out   = os.path.join(POOL_DIR, fname)
+        have  = os.path.exists(out) and os.path.getsize(out) > 0
+        if have and prev.get(fname, {}).get("text") == text:
+            dur = prev[fname].get("dur_ms") or duration_ms(out)
+            print(f"  skip {fname} (exists, {dur} ms)", flush=True)
+        else:
+            raw = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); raw.close()
+            t = time.time()
+            f5.infer(ref_file=REF, ref_text=ref_text, gen_text=text,
+                     file_wave=raw.name, remove_silence=True, nfe_step=32)
+            subprocess.run([FFMPEG, "-y", "-i", raw.name, "-af", CLONE_FILTER, "-q:a", "3", out],
+                           cwd=REF_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try: os.remove(raw.name)
+            except Exception: pass
+            dur = duration_ms(out)
+            print(f"  {fname} {time.time()-t:.1f}s ({dur} ms)", flush=True)
+        e = {"file": fname, "text": text, "dur_ms": dur}
+        if kind:
+            e["kind"] = kind
+        entries.append(e)
+        json.dump(entries, open(MANIFEST, "w"), indent=2)
+
+
 def main():
     full = load_manifest()
-    done = {e["text"]: e for e in full if os.path.exists(os.path.join(POOL_DIR, e.get("file", "")))}
+    prev = {e.get("file", ""): e for e in full}
+    # Preserve hook-synthesized (hal_auto_*) lines across rebuilds, with their kind tags.
     autos = [e for e in full
              if not str(e.get("file", "")).startswith("hal_pool_")
              and os.path.exists(os.path.join(POOL_DIR, e["file"]))]
-    print(f"existing: {len(done)} ({len(autos)} hook-added preserved)", flush=True)
+    print(f"existing autos preserved: {len(autos)}", flush=True)
 
     ref_text = open(REF_TXT, encoding="utf-8").read().strip()
 
@@ -100,27 +136,12 @@ def main():
     f5 = F5TTS()
 
     entries = list(autos)
-    for i, text in enumerate(LINES, 1):
-        fname = f"hal_pool_{i:02d}.mp3"
-        if text in done:
-            e = done[text]
-            if "dur_ms" not in e:
-                e["dur_ms"] = duration_ms(os.path.join(POOL_DIR, e["file"]))
-            entries.append({"file": e["file"], "text": text, "dur_ms": e["dur_ms"]})
-            continue
-        raw = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); raw.close()
-        t = time.time()
-        f5.infer(ref_file=REF, ref_text=ref_text, gen_text=text,
-                 file_wave=raw.name, remove_silence=True, nfe_step=32)
-        out = os.path.join(POOL_DIR, fname)
-        subprocess.run([FFMPEG, "-y", "-i", raw.name, "-af", CLONE_FILTER, "-q:a", "3", out],
-                       cwd=REF_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try: os.remove(raw.name)
-        except Exception: pass
-        dur = duration_ms(out)
-        print(f"[{i}/{len(LINES)}] {time.time()-t:.1f}s -> {fname} ({dur} ms)", flush=True)
-        entries.append({"file": fname, "text": text, "dur_ms": dur})
-        json.dump(entries, open(MANIFEST, "w"), indent=2)
+    print("completion lines:", flush=True)
+    render_group(f5, ref_text, LINES,      "hal_pool_{i:02d}.mp3",      None,   entries, prev)
+    print("failure lines:", flush=True)
+    render_group(f5, ref_text, FAIL_LINES, "hal_pool_fail_{i:02d}.mp3", "fail", entries, prev)
+    print("awaiting-input lines:", flush=True)
+    render_group(f5, ref_text, WAIT_LINES, "hal_pool_wait_{i:02d}.mp3", "wait", entries, prev)
 
     json.dump(entries, open(MANIFEST, "w"), indent=2)
     print(f"\nDONE: {len(entries)} lines -> {POOL_DIR}", flush=True)
