@@ -54,6 +54,14 @@ public class PerPixelLayered {
     public static void NoActivate(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x08000000); }
     public static bool Minimized(IntPtr h){ return IsIconic(h); }
     public static bool WindowExists(IntPtr h){ return h != IntPtr.Zero && IsWindow(h); }
+    // Title text of a window (for matching a chat's window by project name when its handle drifts).
+    public static string WindowTitle(IntPtr h){
+        int len = GetWindowTextLength(h);
+        if(len <= 0) return "";
+        var sb = new System.Text.StringBuilder(len+1);
+        GetWindowText(h, sb, len+1);
+        return sb.ToString();
+    }
     // Screen rect of a window as [x, y, w, h] (or null if it can't be read).
     public static int[] Rect(IntPtr h){ RECT r; if(!GetWindowRect(h, out r)) return null; return new int[]{ r.L, r.T, r.R-r.L, r.B-r.T }; }
     // Topmost visible window whose title ends with `suffix` (e.g. "Visual Studio Code").

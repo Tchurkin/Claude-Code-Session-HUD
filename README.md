@@ -33,6 +33,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 | **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |
 | **"Working on" cards** | A top-right card per chat, colored to that chat, showing its name and **a short summary of what it's doing** (e.g. *"fixing sim landing crash"*, *"adding servos to schematic"*) — it stays up while the chat works and turns to a brief **done** when it finishes. Hover for a hint; click to jump to that chat. |
 | **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — click it to jump to the chat, hover to keep it up. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
+| **Waiting-for-you alert** | When a background chat **finishes and is waiting on your reply**, a persistent top-right card tells you — so a chat that's done in another window doesn't sit there unnoticed. Click to jump; it clears once you reply. (The chat you're actively looking at just gets a quiet "done".) |
 
 Badges stack, so several chats form a tidy dock; the button rides on top of the stack.
 

@@ -25,7 +25,7 @@ function NowMsLocal { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 
 $st = Read-State
 $script:R = 0; $script:G = 215; $script:B = 80; $script:Label = ""; $script:Hwnd = [int64]0
-$script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""
+$script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""; $script:Proj = ""
 if ($st) {
     if ($st.color -and $st.color.Count -ge 3) { $script:R=[int]$st.color[0]; $script:G=[int]$st.color[1]; $script:B=[int]$st.color[2] }
     if ($st.label)  { $script:Label  = [string]$st.label }
@@ -33,6 +33,7 @@ if ($st) {
     if ($st.state)  { $script:State  = [string]$st.state }
     if ($st.branch) { $script:Branch = [string]$st.branch }
     if ($st.reason) { $script:Reason = [string]$st.reason }
+    if ($st.proj)   { $script:Proj   = [string]$st.proj }
 }
 
 $GLOW=12; $R_CORNER=5; $PAD_L=12; $PAD_R=12; $BAR_W=6; $DOTSZ=7
@@ -240,6 +241,7 @@ $timer.Add_Tick({
                 Recalc; $changed = $true    # any of these can change the chip's displayed text/width
             }
             if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
+            if ($st.proj) { $script:Proj = [string]$st.proj }
             if ($st.present_ts) { $script:presentTs = [int64]$st.present_ts }
             # Retire only when the window is really gone, and only after a few consecutive misses,
             # so a transient handle-lookup blip doesn't make the tab flicker out and back.
@@ -260,9 +262,16 @@ $timer.Add_Tick({
     }
     if ($script:closeReq) { $form.Close(); return }
 
-    # The focused window drives the "tab you're on" highlight and un-hiding a dismissed tab.
+    # The focused window drives the "tab you're on" highlight and un-hiding a dismissed tab. Match
+    # by handle first, then (handles drift) by the chat's project name in the window title.
     $fg = ([PerPixelLayered]::GetForegroundWindow()).ToInt64()
     $isOwn = ($script:Hwnd -ne 0 -and $fg -eq [int64]$script:Hwnd)
+    if (-not $isOwn -and $script:Proj -and $fg -ne 0) {
+        try {
+            $ft = [PerPixelLayered]::WindowTitle([IntPtr]$fg)
+            if ($ft -and $ft.EndsWith("Visual Studio Code") -and $ft.Contains($script:Proj)) { $isOwn = $true }
+        } catch {}
+    }
 
     if ($script:hidden) {
         if (-not $isOwn -and $fg -ne $form.Handle.ToInt64()) { $script:armed = $true }   # you've left the window

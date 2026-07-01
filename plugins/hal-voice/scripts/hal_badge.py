@@ -562,7 +562,7 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": now, "color": [r, g, b], "slot": slot, "label": label, "hwnd": hwnd,
                        "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val,
-                       "present_ts": present_ts}, f)
+                       "present_ts": present_ts, "proj": proj}, f)
         os.replace(tmp, sp)
     except Exception:
         return
@@ -613,6 +613,15 @@ def _spawn_popup(title, body, color=None, hwnd=0, duration_ms=9000):
         return False
 
 
+def _fg_hwnd():
+    """The raw foreground window handle (to tell if a chat's own window is the one you're on)."""
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
 def _status_pid(sid):
     return os.path.join(BADGE_DIR, f"status_{_sid8(sid)}.pid")
 
@@ -630,16 +639,19 @@ def _kill_status(sid):
     except Exception: pass
 
 
-def _show_status(sid, cwd, working, detail=None):
+def _show_status(sid, cwd, working, detail=None, waiting=False):
     """Top-right card telling you what this chat is working on. One per chat: the new card
-    replaces the chat's previous one. Sticky while working, brief when it finishes. `detail`
-    (the user's prompt) makes the body specific - the actual task, not just "working"."""
+    replaces the chat's previous one. Sticky while working, brief when it finishes, or a
+    persistent 'waiting for your response' when a background chat finishes and needs you."""
     if os.name != "nt" or not hc.load_config().get("status_card", True):
         return
     st     = _read_state(sid)
     name   = st.get("label") or (os.path.basename(str(cwd).rstrip("/\\")) if cwd else "Claude")
     branch = st.get("branch") or ""
-    if working:
+    if waiting:
+        body = "waiting for your response"
+        dur  = 900000                                    # stays until you reply (replaced on next prompt)
+    elif working:
         body = detail or (f"working · {branch}" if branch and branch not in ("main", "master") else "working…")
         dur  = 900000                                    # stays up through the turn; replaced on stop
     else:
@@ -688,7 +700,11 @@ def main():
         touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
     elif ev == "Stop":
         touch(sid, cwd, state="done", transcript_path=tp)   # response finished
-        _show_status(sid, cwd, working=False)               # top-right: brief "done"
+        hw = int(_read_state(sid).get("hwnd") or 0)
+        if hw and hw == _fg_hwnd():
+            _show_status(sid, cwd, working=False)                    # you're watching -> brief "done"
+        else:
+            _show_status(sid, cwd, working=False, waiting=True)      # background chat -> waiting on your reply
     elif ev == "Notification":
         was_waiting = _read_state(sid).get("state") == "waiting"
         touch(sid, cwd, state="waiting", reason=data.get("message"))   # awaiting your input/permission
