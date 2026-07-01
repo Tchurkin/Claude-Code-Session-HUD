@@ -591,16 +591,18 @@ def _kill_status(sid):
     except Exception: pass
 
 
-def _show_status(sid, cwd, working):
+def _show_status(sid, cwd, working, detail=None):
     """Top-right card telling you what this chat is working on. One per chat: the new card
-    replaces the chat's previous one. Sticky while working, brief when it finishes."""
+    replaces the chat's previous one. Sticky while working, brief when it finishes. `detail`
+    (the user's prompt) makes the body specific - the actual task, not just "working"."""
     if os.name != "nt" or not hc.load_config().get("status_card", True):
         return
     st     = _read_state(sid)
     name   = st.get("label") or (os.path.basename(str(cwd).rstrip("/\\")) if cwd else "Claude")
     branch = st.get("branch") or ""
     if working:
-        body = f"working · {branch}" if branch and branch not in ("main", "master") else "working…"
+        task = _short(detail, 90) if detail else ""      # the actual ask -> a specific description
+        body = task or (f"working · {branch}" if branch and branch not in ("main", "master") else "working…")
         dur  = 900000                                    # stays up through the turn; replaced on stop
     else:
         body = "done"
@@ -639,7 +641,7 @@ def main():
     tp  = data.get("transcript_path")
     if ev == "UserPromptSubmit":
         touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp)
-        _show_status(sid, cwd, working=True)                # top-right: what this chat is working on
+        _show_status(sid, cwd, working=True, detail=data.get("prompt"))   # top-right: the actual task
     elif ev == "SessionStart":
         touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
     elif ev == "Stop":

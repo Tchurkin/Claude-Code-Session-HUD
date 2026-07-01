@@ -22,8 +22,10 @@ $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $ACCENT = [System.Drawing.Color]::FromArgb($AccentR, $AccentG, $AccentB)
 
 $CW=360; $R=6; $GLOW=16; $PAD_L=20; $PAD_R=16; $PAD_T=12; $BAR_W=8; $GAP_TB=3
-$tFont = New-Object System.Drawing.Font("Segoe UI", 11,  [System.Drawing.FontStyle]::Bold)
-$bFont = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+$TIP_W=150; $OX=$TIP_W                                    # room to the LEFT for the hover hint
+$tFont   = New-Object System.Drawing.Font("Segoe UI", 11,  [System.Drawing.FontStyle]::Bold)
+$bFont   = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Regular)
+$tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 $textW = $CW - $PAD_L - $PAD_R
 
 # Measure title + (wrapped) body to size the card.
@@ -33,7 +35,7 @@ $bodyH  = [int][Math]::Ceiling($tg.MeasureString($Body,  $bFont, $textW).Height)
 $tg.Dispose(); $tb.Dispose()
 $CH = $PAD_T + $titleH + $GAP_TB + $bodyH + $PAD_T
 
-$FORM_W = $CW + $GLOW*2
+$FORM_W = $CW + $GLOW*2 + $TIP_W
 $FORM_H = $CH + $GLOW*2
 
 $script:hover     = $false
@@ -67,7 +69,7 @@ $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.Width  = $FORM_W
 $form.Height = $FORM_H
-$form.Left   = $screen.Right - $CW - 18 - $GLOW
+$form.Left   = $screen.Right - $CW - 18 - $GLOW - $TIP_W   # keep the card at the corner; canvas extends left
 $form.Top    = [int]$script:curTop
 
 $render = {
@@ -85,24 +87,24 @@ $render = {
     $g.Clear([System.Drawing.Color]::Transparent)
 
     # glow on top/right/bottom; left kept crisp so the accent edge reads as a solid border
-    $glowClip = New-Object System.Drawing.RectangleF ([float]$GLOW, 0, [float]($FORM_W - $GLOW), [float]$FORM_H)
+    $glowClip = New-Object System.Drawing.RectangleF ([float]($GLOW+$OX), 0, [float]($FORM_W - $GLOW - $OX), [float]$FORM_H)
     $g.SetClip($glowClip)
     for ($sp = $GLOW; $sp -ge 1; $sp--) {
         $alpha = [int]($glowBase * [Math]::Exp(-$sp * 0.30))
         if ($alpha -lt 4) { continue }
-        $gp  = RoundedPath ($GLOW-$sp) ($GLOW-$sp) ($CW+$sp*2) ($CH+$sp*2) ([Math]::Min($R+$sp,14))
+        $gp  = RoundedPath ($GLOW+$OX-$sp) ($GLOW-$sp) ($CW+$sp*2) ($CH+$sp*2) ([Math]::Min($R+$sp,14))
         $pen = New-Object System.Drawing.Pen((CA $alpha $ACCENT), 1.5)
         $g.DrawPath($pen, $gp); $pen.Dispose(); $gp.Dispose()
     }
     $g.ResetClip()
 
-    $cpath = RoundedPath $GLOW $GLOW $CW $CH $R
+    $cpath = RoundedPath ($GLOW+$OX) $GLOW $CW $CH $R
     $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($bgAlpha, $bgShade, $bgShade, $bgShade))
     $g.FillPath($bg, $cpath); $bg.Dispose()
 
     $g.SetClip($cpath)
     $sb = New-Object System.Drawing.SolidBrush $ACCENT
-    $g.FillRectangle($sb, $GLOW, $GLOW, $BAR_W, $CH); $sb.Dispose()
+    $g.FillRectangle($sb, ($GLOW+$OX), $GLOW, $BAR_W, $CH); $sb.Dispose()
     $g.ResetClip()
 
     $bpen = New-Object System.Drawing.Pen((CA $borderA $ACCENT), 1.2)
@@ -110,12 +112,29 @@ $render = {
 
     # title in the session color, body in gray
     $tbrush = New-Object System.Drawing.SolidBrush $ACCENT
-    $trect  = New-Object System.Drawing.RectangleF ([float]($GLOW+$PAD_L), [float]($GLOW+$PAD_T), [float]$textW, [float]$titleH)
+    $trect  = New-Object System.Drawing.RectangleF ([float]($GLOW+$OX+$PAD_L), [float]($GLOW+$PAD_T), [float]$textW, [float]$titleH)
     $g.DrawString($Title, $tFont, $tbrush, $trect); $tbrush.Dispose()
 
-    $bbrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,190,190))
-    $brect  = New-Object System.Drawing.RectangleF ([float]($GLOW+$PAD_L), [float]($GLOW+$PAD_T+$titleH+$GAP_TB), [float]$textW, [float]$bodyH)
+    $bbrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(198,198,202))
+    $brect  = New-Object System.Drawing.RectangleF ([float]($GLOW+$OX+$PAD_L), [float]($GLOW+$PAD_T+$titleH+$GAP_TB), [float]$textW, [float]$bodyH)
     $g.DrawString($Body, $bFont, $bbrush, $brect); $bbrush.Dispose()
+
+    # Hover hint to the LEFT of the card: how to interact.
+    if ($script:hover) {
+        $hint = "Click to jump"
+        $hw   = [int][Math]::Ceiling($g.MeasureString($hint, $tipFont).Width)
+        $hbw  = $hw + 18; $hbh = [int]$tipFont.Height + 8
+        $hbx  = $GLOW + $OX - 10 - $hbw
+        if ($hbx -lt 2) { $hbx = 2 }
+        $hby  = $GLOW + [int](($CH - $hbh)/2)
+        $hp   = RoundedPath $hbx $hby $hbw $hbh 5
+        $hbg  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246, 26, 26, 28))
+        $g.FillPath($hbg, $hp); $hbg.Dispose()
+        $hpen = New-Object System.Drawing.Pen((CA 120 $ACCENT), 1)
+        $g.DrawPath($hpen, $hp); $hpen.Dispose(); $hp.Dispose()
+        $htb  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(237,237,241))
+        $g.DrawString($hint, $tipFont, $htb, [float]($hbx + 9), [float]($hby + 4)); $htb.Dispose()
+    }
 
     $g.Dispose()
     [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, [byte]$winAlpha)
@@ -147,7 +166,7 @@ $timer.Add_Tick({
 
     # hover: light the card up and pause auto-dismiss while the cursor is over it
     $cp = [System.Windows.Forms.Cursor]::Position
-    $cardL = $form.Left + $GLOW; $cardT = $newTop + $GLOW
+    $cardL = $form.Left + $GLOW + $OX; $cardT = $newTop + $GLOW
     $over = ($cp.X -ge $cardL -and $cp.X -lt ($cardL + $CW) -and $cp.Y -ge $cardT -and $cp.Y -lt ($cardT + $CH))
     $needRender = $false
     if ($over -ne $script:hover) { $script:hover = $over; $needRender = $true }
