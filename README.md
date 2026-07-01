@@ -27,7 +27,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 |---|---|
 | **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's own color. It stays put while the chat's window is open (it won't vanish from disuse), and the tab for the window you're currently in stays lit. |
 | **Live state** | The badge shows **✓ done**, a **breathing dot = working**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal. |
-| **Smart name** | The badge is labelled with a 1–3 word summary of what the chat has been working on (from the transcript, via an LLM), not just the folder name. |
+| **Smart name** | The badge is labelled with a 1–3 word summary of what the chat is working on (via Claude), and it **re-checks on every prompt** — keeping the name while it still fits and updating it when the chat's focus shifts, so names don't go stale. |
 | **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to hide it — it comes back when you refocus that window or send the chat a new prompt. Hover a badge (or the button) for a hint on what the clicks do. |
 | **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
 | **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |

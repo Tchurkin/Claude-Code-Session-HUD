@@ -284,7 +284,7 @@ def _claude_cli_run(prompt):
         env = dict(os.environ, HAL_SUPPRESS="1")
         r = subprocess.run(
             [exe, "-p", prompt, "--model", "claude-haiku-4-5-20251001"],
-            capture_output=True, text=True, timeout=18, env=env,
+            capture_output=True, text=True, timeout=32, env=env,
             cwd=tempfile.gettempdir(), creationflags=hc.CREATE_NO_WINDOW)
         t = (r.stdout or "").strip()
         if t:
@@ -344,20 +344,35 @@ def _llm_topic(msgs):
     return _short(t, 30) if t else None
 
 
-def _action_phrase(prompt_text):
-    """A short human summary of the task the chat was just given - e.g. 'adding servos to
-    schematic', 'fixing sim bug', 'testing popup visuals'. Used as the status card's description."""
-    prompt_text = (prompt_text or "").strip()
-    if not prompt_text:
+def _focus_summary(msgs, prompt_text, current_label):
+    """One LLM call that BOTH re-checks the tab name and summarizes the current task, so the name
+    tracks the chat's focus instead of getting stuck on its opening topic. Returns
+    {'label', 'phrase'} (either may be None), or None. The name is kept when it still fits and only
+    changed when the focus has clearly moved on - so it's stable, not churny."""
+    cur   = (current_label or "").strip()
+    ptext = (prompt_text or "").strip()
+    if not ptext and not msgs:
         return None
-    p = ("A coding assistant was just given this request:\n\n" + prompt_text[:1500] +
-         "\n\nDescribe what it is about to work on as a SHORT lowercase action phrase of 2 to 5 "
-         "words in gerund form - e.g. \"fixing sim bug\", \"adding servos to schematic\", "
-         "\"testing popup visuals\". Reply with ONLY the phrase, no punctuation.")
-    t = _llm_run(p, 20)
+    convo = "\n".join(f"{r}: {t[:200]}" for r, t in (msgs or []))[-3500:]
+    p = ("An ongoing coding chat.\n"
+         + (f'Its current short label is: "{cur}".\n' if cur else "")
+         + (f"\nRecent messages:\n{convo}\n" if convo else "")
+         + (f"\nThe user just asked:\n{ptext[:1200]}\n" if ptext else "")
+         + "\nReply with exactly one line:  LABEL | DOING\n"
+           "LABEL = the chat's name in 1 to 3 words, Title Case. "
+         + (f'Keep "{cur}" if it still fits the current focus; change it only if the focus has '
+            "clearly moved on. " if cur else "")
+         + "\nDOING = a 2 to 5 word lowercase gerund phrase for the current task "
+           '(e.g. "fixing sim bug", "adding servos to schematic", "testing popup visuals").\n'
+           "Reply with ONLY:  LABEL | DOING")
+    t = _llm_run(p, 24)
     if not t:
         return None
-    return _short(t.strip().strip('".\'').lower(), 44)
+    line = t.splitlines()[0]
+    lab, _, doing = line.partition("|")
+    lab   = _short(lab.strip().strip('"\'.').strip(), 30)
+    doing = _short(doing.strip().strip('"\'.').lower(), 44)
+    return {"label": lab or None, "phrase": doing or None}
 
 
 def _keyword_from_text(text):
@@ -401,8 +416,8 @@ def _compute_topic(transcript_path):
         t = _llm_topic(msgs)
         if t:
             return t
-    return (_keyword_from_text(_first_user_message(transcript_path))
-            or _keyword_from_text(" ".join(t for r, t in msgs if r == "user")))
+    return (_keyword_from_text(" ".join(t for r, t in msgs if r == "user"))
+            or _keyword_from_text(_first_user_message(transcript_path)))
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────────
@@ -500,7 +515,7 @@ def _dedupe_window(session_id, hwnd):
     return _sid8(session_id) == keeper
 
 
-def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=None, reason=None):
+def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=None, reason=None, name=None):
     """Refresh this chat's badge state and ensure its window is running.
 
     state: 'working' | 'done' | 'waiting' (drives the on-badge indicator).
@@ -527,7 +542,9 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
 
     label    = prev.get("label") or ""
     label_ts = float(prev.get("label_ts") or 0)
-    if transcript_path and (not label or now - label_ts > TOPIC_EVERY):
+    if name:                                          # caller supplied a fresh, focus-aware name
+        label, label_ts = name, now
+    elif transcript_path and (not label or now - label_ts > TOPIC_EVERY):
         topic = _compute_topic(transcript_path)
         if topic:
             label, label_ts = topic, now
@@ -661,8 +678,12 @@ def main():
     cwd = data.get("cwd")
     tp  = data.get("transcript_path")
     if ev == "UserPromptSubmit":
-        touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp)
-        _show_status(sid, cwd, working=True, detail=_action_phrase(data.get("prompt")))  # a short "what it's doing"
+        fu     = _focus_summary(_recent_messages(tp) if tp else [], data.get("prompt"),
+                                _read_state(sid).get("label"))     # re-check the name + summarize the task
+        name   = (fu or {}).get("label")
+        phrase = (fu or {}).get("phrase")
+        touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp, name=name)
+        _show_status(sid, cwd, working=True, detail=phrase)        # short "what it's doing"
     elif ev == "SessionStart":
         touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
     elif ev == "Stop":
