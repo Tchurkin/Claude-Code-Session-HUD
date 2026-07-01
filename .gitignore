@@ -3,6 +3,16 @@ tts_venv/
 __pycache__/
 *.pyc
 *.tmp
-# never commit secrets
-.openai_key
+
+# never commit secrets / credentials
+.env
+.env.*
 *.key
+*.pem
+*_key
+*_key.txt
+.openai_key
+.anthropic_key
+*elevenlabs*key*
+.credentials.json
+secrets.*

@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="360" viewBox="0 0 520 360" font-family="Segoe UI, system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="desk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1d22"/>
+      <stop offset="1" stop-color="#121317"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- desktop -->
+  <rect width="520" height="360" fill="url(#desk)"/>
+
+  <!-- faint "editor" to give the overlay context -->
+  <g opacity="0.35">
+    <rect x="24" y="28" width="300" height="240" rx="10" fill="#0f1013" stroke="#2a2d34"/>
+    <rect x="24" y="28" width="300" height="26" rx="10" fill="#1a1c21"/>
+    <circle cx="40" cy="41" r="4" fill="#ff5f57"/><circle cx="54" cy="41" r="4" fill="#febc2e"/><circle cx="68" cy="41" r="4" fill="#28c840"/>
+    <rect x="42" y="78"  width="150" height="8" rx="4" fill="#3a3f49"/>
+    <rect x="42" y="98"  width="210" height="8" rx="4" fill="#2f333c"/>
+    <rect x="42" y="118" width="120" height="8" rx="4" fill="#2f333c"/>
+    <rect x="42" y="146" width="180" height="8" rx="4" fill="#3a3f49"/>
+    <rect x="42" y="166" width="90"  height="8" rx="4" fill="#2f333c"/>
+    <rect x="42" y="200" width="160" height="8" rx="4" fill="#2f333c"/>
+    <rect x="42" y="220" width="110" height="8" rx="4" fill="#3a3f49"/>
+  </g>
+
+  <!-- cross-platform toast: the new push when a session goes 'awaiting your input' -->
+  <g filter="url(#shadow)">
+    <rect x="286" y="26" width="212" height="60" rx="12" fill="#26282e" stroke="#3a3d45"/>
+    <rect x="286" y="26" width="4" height="60" rx="2" fill="#ffb000"/>
+    <circle cx="312" cy="56" r="12" fill="#33363d"/>
+    <text x="312" y="61" text-anchor="middle" font-size="14">🔔</text>
+    <text x="336" y="51" fill="#f2f3f5" font-size="12.5" font-weight="600">Claude · Auth Refactor</text>
+    <text x="336" y="69" fill="#b7bcc6" font-size="11">Waiting for you — permission to run tests</text>
+  </g>
+
+  <!-- new-window (spark) button rides on top of the badge stack -->
+  <g filter="url(#shadow)">
+    <circle cx="476" cy="150" r="16" fill="#20242b" stroke="#3a4150"/>
+    <path d="M476 142 l2.4 5.6 6 .6 -4.5 4 1.4 5.9 -5.3 -3.2 -5.3 3.2 1.4 -5.9 -4.5 -4 6 -.6 z" fill="#8ab4ff"/>
+  </g>
+
+  <!-- badge dock, bottom-right. one chip per session, in that session's color -->
+  <!-- DONE (cyan) -->
+  <g filter="url(#shadow)">
+    <rect x="322" y="186" width="176" height="40" rx="20" fill="#1e2127" stroke="#00c8ff" stroke-opacity="0.55"/>
+    <circle cx="344" cy="206" r="11" fill="#0e1a1f" stroke="#00c8ff" stroke-width="1.5"/>
+    <path d="M339 206 l3.5 3.5 6 -7" fill="none" stroke="#00c8ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="364" y="202" fill="#e9ecf1" font-size="12.5" font-weight="600">Docs Pass</text>
+    <text x="364" y="216" fill="#7f8792" font-size="9.5">✓ done · docs</text>
+  </g>
+
+  <!-- AWAITING INPUT (amber) — the money state -->
+  <g filter="url(#shadow)">
+    <rect x="322" y="232" width="176" height="40" rx="20" fill="#1e2127" stroke="#ffb000" stroke-opacity="0.85"/>
+    <circle cx="344" cy="252" r="12" fill="none" stroke="#ffb000" stroke-opacity="0.35" stroke-width="2"/>
+    <circle cx="344" cy="252" r="8"  fill="none" stroke="#ffb000" stroke-width="2"/>
+    <text x="364" y="248" fill="#f4f6f9" font-size="12.5" font-weight="600">Auth Refactor</text>
+    <text x="364" y="262" fill="#ffcf6b" font-size="9.5">◍ awaiting you · feat/oauth</text>
+  </g>
+
+  <!-- WORKING (green) -->
+  <g filter="url(#shadow)">
+    <rect x="322" y="278" width="176" height="40" rx="20" fill="#1e2127" stroke="#00d750" stroke-opacity="0.55"/>
+    <circle cx="344" cy="298" r="9" fill="#00d750" filter="url(#soft)" opacity="0.5"/>
+    <circle cx="344" cy="298" r="6" fill="#00d750"/>
+    <text x="364" y="294" fill="#e9ecf1" font-size="12.5" font-weight="600">Session HUD</text>
+    <text x="364" y="308" fill="#7f8792" font-size="9.5">● working · main</text>
+  </g>
+</svg>

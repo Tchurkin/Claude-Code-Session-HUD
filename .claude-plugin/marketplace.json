@@ -6,7 +6,7 @@
     {
       "name": "claude-session-hud",
       "source": "./plugins/hal-voice",
-      "description": "Per-chat state badges, window color-coding, and one-click new-window — see and steer all your parallel Claude Code sessions at a glance."
+      "description": "Distinctly-colored per-session badges (working / done / awaiting you), a 'needs you' popup when a background session is blocked, window color-coding, and click-to-jump — see and steer all your parallel Claude Code sessions at a glance."
     }
   ]
 }
