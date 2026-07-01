@@ -76,6 +76,8 @@ $script:hidden = $false       # right-click hides the tab until you return to it
 $script:armed  = $false       # (hidden) we've since left the window, so refocusing it re-shows the tab
 $script:dismissAt = 0         # when the tab was hidden (ms), compared against state.present_ts
 $script:presentTs = 0         # last time the user was actively present in this chat (from state)
+$script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
+$script:winMiss   = 0         # consecutive window-not-found checks (same idea)
 
 $form = New-Object System.Windows.Forms.Form
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -218,8 +220,12 @@ $timer.Add_Tick({
         $now = NowMsLocal
         try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while hidden)
         $st = Read-State
-        if ($null -eq $st) { $script:closeReq = $true }      # state gone -> chat cleaned up
+        if ($null -eq $st) {
+            $script:missCount++                              # tolerate a transient missing read (avoids flicker)
+            if ($script:missCount -ge 3) { $script:closeReq = $true }
+        }
         else {
+            $script:missCount = 0
             $changed = $false
             if ($st.color -and $st.color.Count -ge 3) {
                 $nr=[int]$st.color[0]; $ng=[int]$st.color[1]; $nb=[int]$st.color[2]
@@ -235,8 +241,14 @@ $timer.Add_Tick({
             }
             if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
             if ($st.present_ts) { $script:presentTs = [int64]$st.present_ts }
-            # Only retire the tab when its window is actually gone (no idle timeout -> tabs persist).
-            if ($script:Hwnd -ne 0 -and -not [PerPixelLayered]::WindowExists([IntPtr]$script:Hwnd)) { $script:closeReq = $true }
+            # Retire only when the window is really gone, and only after a few consecutive misses,
+            # so a transient handle-lookup blip doesn't make the tab flicker out and back.
+            if ($script:Hwnd -ne 0 -and -not [PerPixelLayered]::WindowExists([IntPtr]$script:Hwnd)) {
+                $script:winMiss++
+                if ($script:winMiss -ge 3) { $script:closeReq = $true }
+            } else {
+                $script:winMiss = 0
+            }
             if ($changed -and -not $script:hidden) { & $render }
         }
         if (-not $script:hidden) {
