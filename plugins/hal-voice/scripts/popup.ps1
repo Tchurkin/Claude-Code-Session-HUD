@@ -130,6 +130,7 @@ $form.Add_MouseMove({
     $h = HitClose $e.X $e.Y
     if ($h -ne $script:closeHot) { $script:closeHot = $h; & $render }
 })
+$form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # don't steal focus (keeps the tint bar up)
 $form.Add_Shown({ [PerPixelLayered]::Init($form.Handle); & $render })
 
 # Stacking. The slot only changes when popups appear/disappear, so we hit the shared

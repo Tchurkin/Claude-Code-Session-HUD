@@ -48,6 +48,9 @@ public class PerPixelLayered {
     public static void InitClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x20|0x08000000|0x80); }
     // Add click-through WITHOUT forcing WS_EX_LAYERED (for Form.Opacity overlays that manage layering themselves).
     public static void AddClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x20|0x08000000|0x80); }
+    // Don't steal foreground when shown/clicked (WS_EX_NOACTIVATE) - so notification popups
+    // don't yank focus off the chat window (which would drop the window-tint bar).
+    public static void NoActivate(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x08000000); }
     public static bool Minimized(IntPtr h){ return IsIconic(h); }
     public static bool WindowExists(IntPtr h){ return h != IntPtr.Zero && IsWindow(h); }
     // Screen rect of a window as [x, y, w, h] (or null if it can't be read).
