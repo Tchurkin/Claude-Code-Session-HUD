@@ -60,6 +60,21 @@ def _read_state(sid):
         return {}
 
 
+def _git_branch(cwd):
+    """The chat's current git branch (its worktree/feature branch, when using an
+    orchestrator) - shown on the badge so parallel sessions are distinguishable by branch."""
+    if not cwd or not os.path.isdir(cwd):
+        return ""
+    try:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=2,
+                           creationflags=hc.CREATE_NO_WINDOW)
+        b = (r.stdout or "").strip()
+        return b if b and b != "HEAD" else ""
+    except Exception:
+        return ""
+
+
 def _foreground_hwnd():
     """The focused window ONLY if it's a VS Code window, so a chat's badge never binds to a
     browser/other app that happened to be focused when the async hook ran. 0 otherwise."""
@@ -282,7 +297,7 @@ def _dedupe_window(session_id, hwnd):
     return _sid8(session_id) == keeper
 
 
-def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=None):
+def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=None, reason=None):
     """Refresh this chat's badge state and ensure its window is running.
 
     state: 'working' | 'done' | 'waiting' (drives the on-badge indicator).
@@ -311,13 +326,15 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
         label = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
 
     st = state or prev.get("state") or "done"
+    branch = _git_branch(cwd) if capture_hwnd else (prev.get("branch") or "")   # feature/worktree branch
+    reason_val = _short(reason, 30) if reason else (prev.get("reason") or "")    # what it's waiting on
 
     sp = _state_path(session_id)
     try:
         tmp = sp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": now, "color": [r, g, b], "label": label, "hwnd": hwnd,
-                       "state": st, "label_ts": label_ts}, f)
+                       "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val}, f)
         os.replace(tmp, sp)
     except Exception:
         return
@@ -365,7 +382,7 @@ def main():
     elif ev == "Stop":
         touch(sid, cwd, state="done", transcript_path=tp)   # response finished
     elif ev == "Notification":
-        touch(sid, cwd, state="waiting")                    # awaiting your input/permission
+        touch(sid, cwd, state="waiting", reason=data.get("message"))   # awaiting your input/permission
     elif ev in ("PreToolUse", "PostToolUse"):
         touch(sid, cwd, state="working")                    # keeps the badge/helpers fresh
     else:

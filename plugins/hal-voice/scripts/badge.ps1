@@ -25,16 +25,26 @@ function NowMsLocal { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 
 $st = Read-State
 $script:R = 0; $script:G = 215; $script:B = 80; $script:Label = ""; $script:Hwnd = [int64]0
-$script:State = "done"; $script:phase = 0
+$script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""
 if ($st) {
     if ($st.color -and $st.color.Count -ge 3) { $script:R=[int]$st.color[0]; $script:G=[int]$st.color[1]; $script:B=[int]$st.color[2] }
-    if ($st.label) { $script:Label = [string]$st.label }
-    if ($st.hwnd)  { $script:Hwnd  = [int64]$st.hwnd }
-    if ($st.state) { $script:State = [string]$st.state }
+    if ($st.label)  { $script:Label  = [string]$st.label }
+    if ($st.hwnd)   { $script:Hwnd   = [int64]$st.hwnd }
+    if ($st.state)  { $script:State  = [string]$st.state }
+    if ($st.branch) { $script:Branch = [string]$st.branch }
+    if ($st.reason) { $script:Reason = [string]$st.reason }
 }
 
 $GLOW=12; $R_CORNER=5; $PAD_L=12; $PAD_R=12; $BAR_W=6; $DOTSZ=7
 $hFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
+# The chip text: what it's waiting on (when awaiting input), else the topic + its branch.
+function DisplayText {
+    if ($script:State -eq 'waiting' -and $script:Reason) { return $script:Reason }
+    $t = $script:Label
+    if ($script:Branch -and $script:Branch -notin @('main','master')) { $t = "$t  $($script:Branch)" }
+    return $t
+}
 
 # Measure label to size the chip.
 function Measure-Width($text) {
@@ -44,7 +54,7 @@ function Measure-Width($text) {
 }
 $script:CW = 0; $script:CH = 28
 function Recalc {
-    $lw = Measure-Width $script:Label
+    $lw = Measure-Width (DisplayText)
     $script:CW = $PAD_L + $BAR_W + 8 + $DOTSZ + 8 + $lw + $PAD_R
     if ($script:CW -lt 96) { $script:CW = 96 }
 }
@@ -137,11 +147,12 @@ $render = {
         $g.DrawLines($pen, @($p1,$p2,$p3)); $pen.Dispose()
     }
 
-    # label in the chat color
-    if ($script:Label) {
+    # text in the chat color: awaiting-input reason, else "topic  branch"
+    $disp = DisplayText
+    if ($disp) {
         $tb = New-Object System.Drawing.SolidBrush $accent
         $ty = $GLOW + [int](($script:CH - $hFont.Height)/2)
-        $g.DrawString($script:Label, $hFont, $tb, [float]($dotX + $DOTSZ + 8), [float]$ty); $tb.Dispose()
+        $g.DrawString($disp, $hFont, $tb, [float]($dotX + $DOTSZ + 8), [float]$ty); $tb.Dispose()
     }
 
     $g.Dispose()
@@ -178,11 +189,15 @@ $timer.Add_Tick({
                 $nr=[int]$st.color[0]; $ng=[int]$st.color[1]; $nb=[int]$st.color[2]
                 if ($nr -ne $script:R -or $ng -ne $script:G -or $nb -ne $script:B) { $script:R=$nr;$script:G=$ng;$script:B=$nb;$changed=$true }
             }
-            $nl = if ($st.label) { [string]$st.label } else { "" }
-            if ($nl -ne $script:Label) { $script:Label = $nl; Recalc; $changed = $true }
-            if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
+            $nl  = if ($st.label)  { [string]$st.label }  else { "" }
+            $nbr = if ($st.branch) { [string]$st.branch } else { "" }
+            $nrs = if ($st.reason) { [string]$st.reason } else { "" }
             $nstate = if ($st.state) { [string]$st.state } else { "done" }
-            if ($nstate -ne $script:State) { $script:State = $nstate; $changed = $true }
+            if ($nl -ne $script:Label -or $nbr -ne $script:Branch -or $nrs -ne $script:Reason -or $nstate -ne $script:State) {
+                $script:Label = $nl; $script:Branch = $nbr; $script:Reason = $nrs; $script:State = $nstate
+                Recalc; $changed = $true    # any of these can change the chip's displayed text/width
+            }
+            if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
             # If this chat's window has been closed, retire the badge (its handle is dead).
             if ($script:Hwnd -ne 0 -and -not [PerPixelLayered]::WindowExists([IntPtr]$script:Hwnd)) { $script:closeReq = $true }
             if ($changed) { & $render }
