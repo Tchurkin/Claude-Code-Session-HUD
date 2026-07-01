@@ -5,7 +5,8 @@ param(
     [int]   $AccentG    = 215,
     [int]   $AccentB    = 80,
     [int64] $Hwnd       = 0,                    # click -> focus this chat's window
-    [int]   $DurationMs = 9000                  # auto-dismiss (paused while hovered)
+    [int]   $DurationMs = 9000,                 # auto-dismiss (paused while hovered)
+    [string]$PidFile    = ""                    # when set, record our PID so a chat can replace its own card
 )
 
 # An on-screen "a session needs you" card we draw ourselves - always-on-top, can't be
@@ -80,7 +81,7 @@ $render = {
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
     $g.Clear([System.Drawing.Color]::Transparent)
 
     # glow on top/right/bottom; left kept crisp so the accent edge reads as a solid border
@@ -127,7 +128,10 @@ $form.Add_MouseDown({
     $script:closeReq = $true
 })
 $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # never steal focus
-$form.Add_Shown({ [PerPixelLayered]::Init($form.Handle); & $render })
+$form.Add_Shown({
+    [PerPixelLayered]::Init($form.Handle); & $render
+    if ($PidFile) { try { [System.IO.File]::WriteAllText($PidFile, $PID.ToString()) } catch {} }
+})
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 20
@@ -166,6 +170,9 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
-$form.Add_FormClosed({ try { Stack-Sync $CH $false } catch {} })
+$form.Add_FormClosed({
+    try { Stack-Sync $CH $false } catch {}
+    if ($PidFile) { try { Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue } catch {} }
+})
 
 [System.Windows.Forms.Application]::Run($form)

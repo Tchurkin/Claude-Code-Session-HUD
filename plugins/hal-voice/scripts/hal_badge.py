@@ -574,6 +574,56 @@ def _spawn_popup(title, body, color=None, hwnd=0, duration_ms=9000):
         return False
 
 
+def _status_pid(sid):
+    return os.path.join(BADGE_DIR, f"status_{_sid8(sid)}.pid")
+
+
+def _kill_status(sid):
+    """Dismiss this chat's current top-right status card (if any)."""
+    p = _status_pid(sid)
+    try:
+        pid = int(open(p).read().strip())
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
+                       creationflags=hc.CREATE_NO_WINDOW)
+    except Exception:
+        pass
+    try: os.remove(p)
+    except Exception: pass
+
+
+def _show_status(sid, cwd, working):
+    """Top-right card telling you what this chat is working on. One per chat: the new card
+    replaces the chat's previous one. Sticky while working, brief when it finishes."""
+    if os.name != "nt" or not hc.load_config().get("status_card", True):
+        return
+    st     = _read_state(sid)
+    name   = st.get("label") or (os.path.basename(str(cwd).rstrip("/\\")) if cwd else "Claude")
+    branch = st.get("branch") or ""
+    if working:
+        body = f"working · {branch}" if branch and branch not in ("main", "master") else "working…"
+        dur  = 900000                                    # stays up through the turn; replaced on stop
+    else:
+        body = "done"
+        dur  = 6000                                      # brief "finished" card, then fades
+    try:
+        r, g, b = ((list(st.get("color")) + [0, 215, 80])[:3]) if st.get("color") else (0, 215, 80)
+    except Exception:
+        r, g, b = 0, 215, 80
+    _kill_status(sid)
+    pidf = _status_pid(sid)
+    try:
+        p = subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", POPUP_PS1,
+             "-Title", str(name), "-Body", str(body),
+             "-AccentR", str(int(r)), "-AccentG", str(int(g)), "-AccentB", str(int(b)),
+             "-Hwnd", str(int(st.get("hwnd") or 0)), "-DurationMs", str(dur), "-PidFile", pidf],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=hc.CREATE_NO_WINDOW)
+        with open(pidf, "w") as f:
+            f.write(str(p.pid))
+    except Exception:
+        pass
+
+
 def main():
     # Single hook entry point for every event. Maps the event to a badge state; captures
     # the window handle + refreshes the "working on" label at the moments the user is here.
@@ -589,10 +639,12 @@ def main():
     tp  = data.get("transcript_path")
     if ev == "UserPromptSubmit":
         touch(sid, cwd, capture_hwnd=True, state="working", transcript_path=tp)
+        _show_status(sid, cwd, working=True)                # top-right: what this chat is working on
     elif ev == "SessionStart":
         touch(sid, cwd, capture_hwnd=True, state="done", transcript_path=tp)
     elif ev == "Stop":
         touch(sid, cwd, state="done", transcript_path=tp)   # response finished
+        _show_status(sid, cwd, working=False)               # top-right: brief "done"
     elif ev == "Notification":
         was_waiting = _read_state(sid).get("state") == "waiting"
         touch(sid, cwd, state="waiting", reason=data.get("message"))   # awaiting your input/permission

@@ -31,6 +31,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 | **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to hide it — it comes back when you refocus that window or send the chat a new prompt. Hover a badge (or the button) for a hint on what the clicks do. |
 | **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
 | **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |
+| **"Working on" cards** | A top-right card per chat, colored to that chat, showing what it's working on (its name) — it stays up while the chat works and turns to a brief **done** when it finishes. Click to jump to that chat. |
 | **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — click it to jump to the chat, hover to keep it up. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
 
 Badges stack, so several chats form a tidy dock; the button rides on top of the stack.
@@ -97,6 +98,7 @@ Claude Code will then refresh it at startup and prompt you to reload when there'
 | `window_tint` | color-accent the focused chat window (default true) — *Windows + VS Code* |
 | `button` | show the new-window button (default true) — *Windows* |
 | `popup` | our own on-screen "a session needs you" card, colored to the session (default true) — *Windows* |
+| `status_card` | top-right per-chat card of what each chat is working on (default true) — *Windows* |
 | `notify` | native desktop toast; fallback when `popup` is off or off-Windows (default true) — *cross-platform* |
 | `use_openai` | name tabs with OpenAI instead of Claude (default false; needs `OPENAI_API_KEY`) |
 

@@ -22,6 +22,7 @@ _DEFAULTS = {
     "window_tint": True,    # colored accent bar on the focused chat's VS Code window
     "button":      True,    # always-on-top button (new chat in a new window)
     "popup":       True,    # our own on-screen "a session needs you" card (Windows)
+    "status_card": True,    # top-right per-chat card showing what each chat is working on (Windows)
     "notify":      True,    # native desktop toast (fallback off-Windows / when popup is off)
     "use_openai":  False,   # opt-in: name tabs with OpenAI. Off = Claude only (API key or CLI)
 }
