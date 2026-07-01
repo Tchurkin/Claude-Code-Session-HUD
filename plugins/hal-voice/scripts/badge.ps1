@@ -69,6 +69,7 @@ $script:target  = $script:curTop
 $script:lastTop = -99999
 $script:tick = 0
 $script:closeReq = $false
+$script:hover = $false
 
 $form = New-Object System.Windows.Forms.Form
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -94,6 +95,13 @@ function RoundedPath($x,$y,$w,$h,$rad){
 
 $render = {
     $accent = [System.Drawing.Color]::FromArgb($script:R, $script:G, $script:B)
+    # Hover state lights the chip up: brighter glow, lighter fill, stronger border, fully opaque.
+    $glowBase = if ($script:hover) { 205 } else { 120 }
+    $bgAlpha  = if ($script:hover) { 246 } else { 228 }
+    $bgShade  = if ($script:hover) { 44 }  else { 17 }
+    $borderA  = if ($script:hover) { 255 } else { 200 }
+    $borderW  = if ($script:hover) { 1.9 } else { 1.2 }
+    $winAlpha = if ($script:hover) { 255 } else { 240 }
     # The chip is right-aligned inside the (wide) transparent canvas; this is its left edge.
     $cx = $FORM_W - $GLOW - $script:CW
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -106,7 +114,7 @@ $render = {
     $glowClip = New-Object System.Drawing.RectangleF ([float]$cx, 0, [float]($FORM_W - $cx), [float]$FORM_H)
     $g.SetClip($glowClip)
     for ($sp = $GLOW; $sp -ge 1; $sp--) {
-        $alpha = [int](120 * [Math]::Exp(-$sp * 0.34))
+        $alpha = [int]($glowBase * [Math]::Exp(-$sp * 0.34))
         if ($alpha -lt 4) { continue }
         $gp = RoundedPath ($cx-$sp) ($GLOW-$sp) ($script:CW+$sp*2) ($script:CH+$sp*2) ([Math]::Min($R_CORNER+$sp,12))
         $pen = New-Object System.Drawing.Pen((CA $alpha $accent), 1.4)
@@ -115,7 +123,7 @@ $render = {
     $g.ResetClip()
 
     $cpath = RoundedPath $cx $GLOW $script:CW $script:CH $R_CORNER
-    $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(228, 17, 17, 17))
+    $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($bgAlpha, $bgShade, $bgShade, $bgShade))
     $g.FillPath($bg, $cpath); $bg.Dispose()
 
     $g.SetClip($cpath)
@@ -123,7 +131,7 @@ $render = {
     $g.FillRectangle($sb, $cx, $GLOW, $BAR_W, $script:CH); $sb.Dispose()
     $g.ResetClip()
 
-    $bpen = New-Object System.Drawing.Pen((CA 200 $accent), 1.2)
+    $bpen = New-Object System.Drawing.Pen((CA $borderA $accent), $borderW)
     $g.DrawPath($bpen, $cpath); $bpen.Dispose(); $cpath.Dispose()
 
     # state indicator: done = check, working = breathing dot, waiting = blinking ring
@@ -156,7 +164,7 @@ $render = {
     }
 
     $g.Dispose()
-    [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, 240)
+    [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, $winAlpha)
     $bmp.Dispose()
 }
 
@@ -215,6 +223,15 @@ $timer.Add_Tick({
         $form.Top = $newTop
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
+
+    # Hover: light the chip up while the cursor is over it. A per-pixel layered window only
+    # "owns" its visible pixels, so poll the cursor against the chip's screen rect (MouseLeave
+    # is unreliable here). Cheap point-in-rect test each tick; re-render only when it flips.
+    $chipL = $form.Left + ($FORM_W - $GLOW - $script:CW)
+    $chipT = $form.Top + $GLOW
+    $cp = [System.Windows.Forms.Cursor]::Position
+    $over = ($cp.X -ge $chipL -and $cp.X -lt ($chipL + $script:CW) -and $cp.Y -ge $chipT -and $cp.Y -lt ($chipT + $script:CH))
+    if ($over -ne $script:hover) { $script:hover = $over; & $render }
 
     # Animate the indicator (~11 fps) while working/awaiting; 'done' stays static.
     if ((($script:State -eq "working") -or ($script:State -eq "waiting")) -and (($script:tick % 3) -eq 0)) {

@@ -6,7 +6,7 @@ Imported by the single hook entry point - no heavy dependencies.
 Machine-local state (config + scratch: badge state, PID/alive files) lives in
 ``~/.claude/hal_voice``.
 """
-import hashlib, json, os
+import colorsys, hashlib, json, os
 
 HOME        = os.path.expanduser("~")
 DATA_DIR    = os.path.join(HOME, ".claude", "hal_voice")
@@ -21,35 +21,44 @@ _DEFAULTS = {
     "badge":       True,    # persistent per-chat color badge window (bottom-right)
     "window_tint": True,    # colored accent bar on the focused chat's VS Code window
     "button":      True,    # always-on-top button (new chat in a new window)
+    "popup":       True,    # our own on-screen "a session needs you" card (Windows)
+    "notify":      True,    # native desktop toast (fallback off-Windows / when popup is off)
+    "use_openai":  False,   # opt-in: name tabs with OpenAI. Off = Claude only (API key or CLI)
 }
 
-# Per-chat colors. Each session maps (by hashing its id) to one vivid accent, so several
-# chats open at once are easy to tell apart.
-SESSION_PALETTE = [
-    (0, 215, 80),     # green
-    (0, 200, 255),    # cyan
-    (255, 176, 0),    # amber
-    (235, 70, 200),   # magenta
-    (170, 110, 255),  # purple
-    (70, 150, 255),   # blue
-    (0, 205, 170),    # teal
-    (255, 120, 40),   # orange
-    (140, 220, 0),    # lime
-    (255, 105, 160),  # pink
-    (90, 190, 255),   # sky
-    (210, 190, 40),   # gold
-    (120, 230, 160),  # mint
-    (200, 120, 255),  # violet
-]
+# Per-chat colors are assigned by SLOT - the position of a session among those currently
+# open - not by hashing its id. Hashing collides (two of five tabs routinely share a color);
+# slots don't. Each slot steps around the hue wheel by the GOLDEN ANGLE (~137.5 deg), which
+# is the spacing that keeps *any* number of points maximally far apart: the first tabs land
+# on wildly different hues, and colors only begin to resemble each other once ~a dozen tabs
+# are open at once. slot_color(0) is green (the familiar "first session"), then violet,
+# yellow, cyan, pink, lime, ... See hal_badge._assign_slot for how a session claims a slot.
+_HUE_START = 145.0        # slot 0 -> green
+_GOLDEN    = 137.50776    # golden angle, in degrees
+_SAT       = 0.82         # vivid but not neon, reads well on a dark desktop
+_VAL       = 1.0
 FAIL_COLOR = (240, 80, 70)   # error red (reserved for a future 'failed' badge state)
 
 
+def slot_color(slot):
+    """Vivid, maximally-distinct accent for the session in slot ``slot`` (0, 1, 2, ...)."""
+    try:
+        slot = int(slot)
+    except Exception:
+        slot = 0
+    hue = ((_HUE_START + slot * _GOLDEN) % 360.0) / 360.0
+    r, g, b = colorsys.hsv_to_rgb(hue, _SAT, _VAL)
+    return (round(r * 255), round(g * 255), round(b * 255))
+
+
 def session_color(session_id):
-    """Stable vivid accent for a chat session (same chat -> same color every time)."""
+    """Stable fallback accent (hash the id onto the same wheel) for callers that don't have a
+    slot. The live badge path assigns real, collision-free slots instead - see
+    ``hal_badge._assign_slot`` - so this is only a last resort."""
     if not session_id:
-        return SESSION_PALETTE[0]
+        return slot_color(0)
     h = int(hashlib.md5(str(session_id).encode("utf-8")).hexdigest(), 16)
-    return SESSION_PALETTE[h % len(SESSION_PALETTE)]
+    return slot_color(h % 64)
 
 
 def ensure_data_dir():

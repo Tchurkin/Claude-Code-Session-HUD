@@ -9,11 +9,12 @@ window heartbeats ``<sid>.alive`` so we don't double-spawn, and it self-dismisse
 the chat has been idle for a while. Also runnable directly as a hook (reads session JSON
 on stdin) - used for SessionStart / UserPromptSubmit.
 """
-import glob, json, os, re, subprocess, sys, time, urllib.request
+import glob, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hal_common as hc
+import hal_notify
 
 # Filler words to ignore when deriving a theme without the LLM.
 _STOP = set((
@@ -33,6 +34,7 @@ BADGE_DIR   = os.path.join(hc.DATA_DIR, "badges")
 BADGE_PS1   = os.path.join(hc.SCRIPTS_DIR, "badge.ps1")
 TINT_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_tint.ps1")
 BUTTON_PS1  = os.path.join(hc.SCRIPTS_DIR, "claude_button.ps1")
+POPUP_PS1   = os.path.join(hc.SCRIPTS_DIR, "popup.ps1")
 IDLE_MS     = 20 * 60 * 1000     # auto-dismiss after this much chat inactivity
 TOPIC_EVERY = 90 * 1000          # recompute the "working on" label at most this often
 
@@ -215,6 +217,20 @@ def _short(s, n):
     return s if len(s) <= n else s[:n - 1].rstrip() + "…"
 
 
+def _anthropic_key():
+    k = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if k:
+        return k
+    for p in ("~/.claude/.anthropic_key", "~/.anthropic_key"):
+        try:
+            v = open(os.path.expanduser(p)).read().strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return None
+
+
 def _openai_key():
     k = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if k:
@@ -229,16 +245,83 @@ def _openai_key():
     return None
 
 
+_CLAUDE_EXE = None
+_CLAUDE_EXE_DONE = False
+
+
+def _claude_exe():
+    """Locate the Claude Code CLI so we can name tabs via the user's existing Claude Code login
+    (no API key, uses their subscription). Prefers a `claude` on PATH; otherwise the binary
+    bundled inside the VS Code / Cursor extension, newest install winning. Cached per process."""
+    global _CLAUDE_EXE, _CLAUDE_EXE_DONE
+    if _CLAUDE_EXE_DONE:
+        return _CLAUDE_EXE
+    _CLAUDE_EXE_DONE = True
+    exe = shutil.which("claude")
+    if exe:
+        _CLAUDE_EXE = exe
+        return exe
+    cands = []
+    for d in (".vscode", ".vscode-insiders", ".vscode-server", ".cursor", ".windsurf"):
+        root = os.path.expanduser(os.path.join("~", d, "extensions"))
+        for nm in ("claude.exe", "claude"):
+            cands += glob.glob(os.path.join(root, "anthropic.claude-code-*", "resources", "native-binary", nm))
+    if cands:
+        try:
+            _CLAUDE_EXE = max(cands, key=os.path.getmtime)     # newest-installed extension
+        except Exception:
+            _CLAUDE_EXE = cands[-1]
+    return _CLAUDE_EXE
+
+
+def _claude_cli_topic(prompt):
+    """Name the tab through the user's Claude Code login (no API key). Runs headless in a temp
+    cwd (so it won't load the project's context) with HAL_SUPPRESS set so its own hooks no-op."""
+    exe = _claude_exe()
+    if not exe:
+        return None
+    try:
+        env = dict(os.environ, HAL_SUPPRESS="1")
+        r = subprocess.run(
+            [exe, "-p", prompt, "--model", "claude-haiku-4-5-20251001"],
+            capture_output=True, text=True, timeout=18, env=env,
+            cwd=tempfile.gettempdir(), creationflags=hc.CREATE_NO_WINDOW)
+        t = (r.stdout or "").strip()
+        if t:
+            t = t.splitlines()[0].strip().strip('."\'').strip()
+        if t and len(t) <= 40:
+            return _short(t, 30)
+    except Exception:
+        pass
+    return None
+
+
 def _llm_topic(msgs):
-    """1-3 word theme of the RECENT focus, via whichever LLM key is available (OpenAI, then
-    Anthropic). Reflects current work so a chat that shifts topic re-labels itself."""
+    """1-3 word theme of the RECENT focus. This is a Claude Code plugin, so it uses Claude: an
+    Anthropic API key if set, else the local Claude Code CLI (your subscription, no key). OpenAI
+    is opt-in only (config `use_openai`). Reflects current work so a chat re-labels on a shift."""
     convo = "\n".join(f"{r}: {t[:220]}" for r, t in msgs)[-4200:]
     prompt = ("Below are recent messages from an ongoing coding chat, oldest to newest:\n\n"
               + convo +
               "\n\nName what this chat is currently working on in 1 to 3 words (Title Case, no "
               "quotes or punctuation), reflecting the RECENT focus. Reply with ONLY the phrase.")
-    key = _openai_key()
-    if key:
+    akey = _anthropic_key()
+    if akey:
+        try:
+            import anthropic
+            m = anthropic.Anthropic(api_key=akey, timeout=6.0).messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=12,
+                messages=[{"role": "user", "content": prompt}])
+            t = m.content[0].text.strip().strip('."\'').strip()
+            if t:
+                return _short(t, 30)
+        except Exception:
+            pass
+    t = _claude_cli_topic(prompt)          # your existing Claude Code login - no API key needed
+    if t:
+        return t
+    if hc.load_config().get("use_openai", False) and _openai_key():   # ChatGPT: opt-in, off by default
+        key = _openai_key()
         try:
             body = json.dumps({"model": "gpt-4o-mini", "max_tokens": 12, "temperature": 0.3,
                                "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
@@ -252,16 +335,6 @@ def _llm_topic(msgs):
                 return _short(t, 30)
         except Exception:
             pass
-    try:
-        import anthropic
-        m = anthropic.Anthropic(timeout=6.0).messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=12,
-            messages=[{"role": "user", "content": prompt}])
-        t = m.content[0].text.strip().strip('."\'').strip()
-        if t:
-            return _short(t, 30)
-    except Exception:
-        pass
     return None
 
 
@@ -346,6 +419,38 @@ def _gc_stale():
             pass
 
 
+def _active_slots(exclude_sid):
+    """Color slots currently held by other, still-active sessions."""
+    now  = time.time() * 1000
+    ex   = _sid8(exclude_sid)
+    used = set()
+    for f in glob.glob(os.path.join(BADGE_DIR, "*.json")):
+        if os.path.basename(f)[:-5] == ex:
+            continue
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        if (now - float(d.get("ts", 0))) > IDLE_MS:
+            continue                                   # stale session, its slot is free again
+        s = d.get("slot")
+        if s is not None:
+            try: used.add(int(s))
+            except Exception: pass
+    return used
+
+
+def _assign_slot(session_id):
+    """The lowest slot not already taken by another open session, so a new chat gets the most
+    different color still available. Slots free up as sessions go idle and are GC'd, so the
+    palette stays tight around however many chats are actually live."""
+    used = _active_slots(session_id)
+    slot = 0
+    while slot in used:
+        slot += 1
+    return slot
+
+
 def _dedupe_window(session_id, hwnd):
     """One badge per VS Code window: keep the most-recently-active session for a given
     window and retire the rest (older tabs / churned or leftover sessions). Returns True if
@@ -382,7 +487,10 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     os.makedirs(BADGE_DIR, exist_ok=True)
     now  = int(time.time() * 1000)
     prev = _read_state(session_id)
-    r, g, b = hc.session_color(session_id)
+    slot = prev.get("slot")
+    if slot is None:
+        slot = _assign_slot(session_id)              # first sighting -> claim the most distinct free color
+    r, g, b = hc.slot_color(slot)
     proj   = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
     prev_h = int(prev.get("hwnd") or 0)
     if capture_hwnd:
@@ -409,7 +517,7 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     try:
         tmp = sp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"ts": now, "color": [r, g, b], "label": label, "hwnd": hwnd,
+            json.dump({"ts": now, "color": [r, g, b], "slot": slot, "label": label, "hwnd": hwnd,
                        "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val}, f)
         os.replace(tmp, sp)
     except Exception:
@@ -440,9 +548,32 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
         _ensure_singleton("claude_button", BUTTON_PS1)
 
 
+def _spawn_popup(title, body, color=None, hwnd=0, duration_ms=9000):
+    """Draw our own always-on-top 'a session needs you' card (Windows only). Returns True if
+    it was launched, so the caller can fall back to an OS toast off-Windows or on failure."""
+    if os.name != "nt":
+        return False
+    try:
+        r, g, b = ((list(color) + [0, 215, 80])[:3]) if color else (0, 215, 80)
+    except Exception:
+        r, g, b = 0, 215, 80
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", POPUP_PS1,
+             "-Title", str(title or "Claude"), "-Body", str(body or "Waiting for you"),
+             "-AccentR", str(int(r)), "-AccentG", str(int(g)), "-AccentB", str(int(b)),
+             "-Hwnd", str(int(hwnd or 0)), "-DurationMs", str(int(duration_ms))],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=hc.CREATE_NO_WINDOW)
+        return True
+    except Exception:
+        return False
+
+
 def main():
     # Single hook entry point for every event. Maps the event to a badge state; captures
     # the window handle + refreshes the "working on" label at the moments the user is here.
+    if os.environ.get("HAL_SUPPRESS"):     # inside a `claude -p` we launched to name a tab -> do nothing
+        return
     try:
         data = json.loads(sys.stdin.read().lstrip("﻿"))
     except Exception:
@@ -458,7 +589,19 @@ def main():
     elif ev == "Stop":
         touch(sid, cwd, state="done", transcript_path=tp)   # response finished
     elif ev == "Notification":
+        was_waiting = _read_state(sid).get("state") == "waiting"
         touch(sid, cwd, state="waiting", reason=data.get("message"))   # awaiting your input/permission
+        if not was_waiting:                                            # notify only on the transition
+            cfg    = hc.load_config()
+            st     = _read_state(sid)
+            name   = st.get("label") or (os.path.basename(str(cwd).rstrip("/\\")) if cwd else "Claude")
+            reason = st.get("reason") or "awaiting your input"
+            shown  = False
+            if cfg.get("popup", True):                                 # our own on-screen card (Windows)
+                shown = _spawn_popup(name, f"Waiting for you — {reason}",
+                                     st.get("color"), int(st.get("hwnd") or 0))
+            if not shown and cfg.get("notify", True):                  # else fall back to an OS toast
+                hal_notify.notify(f"Claude · {name}", f"Waiting for you — {reason}")
     elif ev in ("PreToolUse", "PostToolUse"):
         touch(sid, cwd, state="working")                    # keeps the badge/helpers fresh
     else:
