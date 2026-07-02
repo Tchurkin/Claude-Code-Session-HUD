@@ -15,7 +15,7 @@ $script:mutex = New-Object System.Threading.Mutex($true, "hal_claude_button", [r
 if (-not $created) { exit }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$CW = 44; $CH = 44; $GLOW = 12; $R = 10
+$CW = 22; $CH = 22; $GLOW = 10; $R = 6
 $TIP_W = 150                                                 # room to the LEFT for the hover hint
 $OX = $TIP_W                                                 # button x-origin inside the (wider) canvas
 $ACCENT = [System.Drawing.Color]::FromArgb(217, 119, 87)     # Claude clay/orange
@@ -133,10 +133,10 @@ $render = {
 
     # A simple plus (new chat).
     $cx = $GLOW + $OX + $CW/2; $cy = $GLOW + $CH/2
-    $penS = New-Object System.Drawing.Pen($acc, 3.0)
+    $penS = New-Object System.Drawing.Pen($acc, 2.2)
     $penS.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $penS.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
-    $arm = 9
+    $arm = 5
     $g.DrawLine($penS, [float]($cx-$arm), [float]$cy, [float]($cx+$arm), [float]$cy)
     $g.DrawLine($penS, [float]$cx, [float]($cy-$arm), [float]$cx, [float]($cy+$arm))
     $penS.Dispose()
