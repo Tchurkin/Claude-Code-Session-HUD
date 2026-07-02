@@ -1,0 +1,21 @@
+{
+  "name": "claude-session-hud-statusbar",
+  "displayName": "Claude Session HUD — Status Bar Toggle",
+  "description": "A bottom-bar on/off switch for the Claude Session HUD plugin.",
+  "version": "0.1.0",
+  "publisher": "braxtonherold",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "repository": { "type": "git", "url": "https://github.com/Tchurkin/Claude-Code-Session-HUD" },
+  "license": "MIT",
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "scripts": {
+    "package": "npx --yes @vscode/vsce package --no-dependencies"
+  },
+  "contributes": {
+    "commands": [
+      { "command": "claudeHud.toggle", "title": "Claude HUD: Toggle On/Off" }
+    ]
+  }
+}
