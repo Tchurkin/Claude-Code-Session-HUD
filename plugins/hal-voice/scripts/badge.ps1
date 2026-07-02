@@ -65,7 +65,7 @@ $FORM_W = 520 + $GLOW*2     # generous canvas; we blit only the chip and move it
 $FORM_H = $script:CH + $GLOW*2
 
 $GAP = 8
-$script:bottomAnchor = $screen.Bottom - 16 - $GLOW       # tabs sit at the bottom-right corner
+$script:bottomAnchor = $screen.Bottom - 44 - $GLOW       # sit above VS Code's status bar, bottom-right
 $script:curTop  = $script:bottomAnchor - $script:CH
 $script:target  = $script:curTop
 $script:lastTop = -99999

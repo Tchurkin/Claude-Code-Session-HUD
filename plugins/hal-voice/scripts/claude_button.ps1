@@ -33,7 +33,9 @@ $form.TopMost         = $true
 $form.Width  = $FORM_W; $form.Height = $FORM_H
 # The button rides just above the badge ("chat tab") stack; at the corner when there are none.
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
-$dockBottom = $screen.Bottom - 16               # the button rides just above the tab stack, at the corner
+$badgeDir = Join-Path $env:USERPROFILE ".claude\hal_voice\badges"   # per-chat state files (for the focus watcher)
+$badgePs1 = Join-Path $PSScriptRoot 'badge.ps1'
+$dockBottom = $screen.Bottom - 44               # above VS Code's status bar; button rides atop the tab stack
 $GAPB = 8
 $script:curTop    = $dockBottom - $GLOW - $CH
 $script:targetTop = $script:curTop
@@ -51,6 +53,48 @@ function StackHeight {
         }
     } catch {}
     return @($count, $sum)
+}
+
+# When you focus a VS Code window, make sure the chat in it has a tab. Tabs are normally created
+# by Claude Code hooks, and just focusing a window fires no hook - so an idle chat (or one whose
+# badge was killed) wouldn't get a tab. This bridges that: if the focused window's chat has saved
+# state but no live badge, (re)spawn its badge. Matches by window handle, else by project title.
+function Ensure-FocusedTab {
+    $fg = [PerPixelLayered]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { return }
+    $title = ""
+    try { $title = [PerPixelLayered]::WindowTitle($fg) } catch {}
+    if (-not ($title -and $title.EndsWith("Visual Studio Code"))) { return }
+    $fgL = $fg.ToInt64(); $now = NowMs
+    $anyAlive = $false; $bestFile = $null; $bestAp = $null; $bestTs = -1
+    try {
+        foreach ($f in [System.IO.Directory]::GetFiles($badgeDir, "*.json")) {
+            $d = $null
+            try { $d = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { continue }
+            if (-not $d) { continue }
+            $mh = ($d.hwnd -and ([int64]$d.hwnd -eq $fgL))
+            $mp = ($d.proj -and $title.Contains([string]$d.proj))
+            if (-not ($mh -or $mp)) { continue }
+            $sid8 = [System.IO.Path]::GetFileNameWithoutExtension($f)
+            $ap = Join-Path $badgeDir ($sid8 + ".alive")
+            $fresh = $false
+            try { $fresh = ($now - [int64]([System.IO.File]::ReadAllText($ap).Trim())) -lt 4000 } catch {}
+            if ($fresh) { $anyAlive = $true; continue }        # a tab for this window is already up
+            $ts = 0; try { $ts = [int64]$d.ts } catch {}
+            if ($ts -gt $bestTs) { $bestTs = $ts; $bestFile = $f; $bestAp = $ap }
+        }
+    } catch {}
+    if (-not $anyAlive -and $bestFile) {
+        try { [System.IO.File]::WriteAllText($bestAp, $now.ToString()) } catch {}   # pre-mark; badge mutex guards doubles
+        try {
+            $a = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -StateFile "{1}" -AliveFile "{2}" -IdleMs 1200000' -f $badgePs1, $bestFile, $bestAp
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell"; $psi.Arguments = $a
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
+        } catch {}
+    }
 }
 
 function RoundedPath($x, $y, $w, $h, $rad) {
@@ -158,6 +202,7 @@ $timer.Add_Tick({
         if ([PerPixelLayered]::FindWindowEndsWith("Visual Studio Code") -ne [IntPtr]::Zero) { $script:lastVs = NowMs }
         elseif ((NowMs) - $script:lastVs -gt 30000) { $form.Close(); return }   # VS Code gone -> retire
     }
+    if (($script:tick % 17) -eq 5) { Ensure-FocusedTab }   # ~every 0.5s: focus a window -> surface its tab
     $delta = $script:targetTop - $script:curTop
     if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:targetTop } else { $script:curTop += $delta * 0.22 }
     $newTop = [int]$script:curTop
