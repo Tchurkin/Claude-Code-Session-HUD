@@ -42,6 +42,7 @@ $form.Add_Shown({ [PerPixelLayered]::InitClickThrough($form.Handle) })
 
 $script:cur = ""
 $script:lastSeen = NowMs
+$script:tintTick = 0
 
 function Draw-Bar($x, $y, $w, $col) {
     if ($w -lt 8) { Hide-Bar; return }
@@ -73,6 +74,7 @@ function Hide-Bar {
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 120
 $timer.Add_Tick({
+    if (($script:tintTick++ % 8) -eq 0 -and -not (Hud-Enabled)) { $form.Close(); return }   # HUD off -> retire
     if ($AliveFile) { try { [System.IO.File]::WriteAllText($AliveFile, (NowMs).ToString()) } catch {} }
     $fg  = [PerPixelLayered]::GetForegroundWindow()
     $col = ColorForHwnd ([int64]$fg)

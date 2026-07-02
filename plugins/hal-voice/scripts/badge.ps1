@@ -65,7 +65,7 @@ $FORM_W = 520 + $GLOW*2     # generous canvas; we blit only the chip and move it
 $FORM_H = $script:CH + $GLOW*2
 
 $GAP = 8
-$script:bottomAnchor = $screen.Bottom - 16 - $GLOW      # tabs sit at the corner; the button rides above them
+$script:bottomAnchor = $screen.Bottom - 16 - $GLOW - 44  # leave room for the on/off toggle in the very corner
 $script:curTop  = $script:bottomAnchor - $script:CH
 $script:target  = $script:curTop
 $script:lastTop = -99999
@@ -220,6 +220,7 @@ $timer.Add_Tick({
     if (($script:tick % 20) -eq 1) {
         $now = NowMsLocal
         try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while hidden)
+        if (-not (Hud-Enabled)) { $script:closeReq = $true }                  # HUD switched off -> retire
         $st = Read-State
         if ($null -eq $st) {
             $script:missCount++                              # tolerate a transient missing read (avoids flicker)

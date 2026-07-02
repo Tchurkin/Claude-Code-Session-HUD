@@ -150,6 +150,29 @@ function Set-StackNamespace($name) {
     try { [System.IO.Directory]::CreateDirectory($script:PopupDir) | Out-Null } catch {}
 }
 
+# ── master on/off flag ───────────────────────────────────────────────────────
+# The HUD's overlays poll Hud-Enabled and close themselves when the toggle button switches the
+# HUD off; the toggle button flips it with Set-HudEnabled. Stored in the plugin config.
+$script:HalCfgPath = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "config.json"
+function Hud-Enabled {
+    try {
+        $c = Get-Content -LiteralPath $script:HalCfgPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($c -and ($c.PSObject.Properties.Name -contains 'enabled')) { return [bool]$c.enabled }
+    } catch {}
+    return $true
+}
+function Set-HudEnabled($val) {
+    try {
+        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:HalCfgPath))
+        $c = $null
+        try { $c = Get-Content -LiteralPath $script:HalCfgPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+        if (-not $c) { $c = [pscustomobject]@{} }
+        if ($c.PSObject.Properties.Name -contains 'enabled') { $c.enabled = [bool]$val }
+        else { $c | Add-Member -NotePropertyName enabled -NotePropertyValue ([bool]$val) }
+        ($c | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $script:HalCfgPath -Encoding utf8
+    } catch {}
+}
+
 # Bottom-anchored variant: newest sits AT the bottom anchor, older stack upward above it.
 function Stack-TargetBottom($bottomAnchor, $gap, $ordered, $selfHeight) {
     $below = 0

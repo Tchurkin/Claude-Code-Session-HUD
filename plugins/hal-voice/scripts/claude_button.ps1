@@ -33,7 +33,7 @@ $form.TopMost         = $true
 $form.Width  = $FORM_W; $form.Height = $FORM_H
 # The button rides just above the badge ("chat tab") stack; at the corner when there are none.
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
-$dockBottom = $screen.Bottom - 16
+$dockBottom = $screen.Bottom - 16 - 44          # leave room for the on/off toggle in the very corner
 $GAPB = 8
 $script:curTop    = $dockBottom - $GLOW - $CH
 $script:targetTop = $script:curTop
@@ -153,6 +153,7 @@ $timer.Add_Tick({
         $script:targetTop = [int]($bBottom - $GLOW - $CH)
     }
     if (($script:tick % 33) -eq 0) {                 # ~every 1s: heartbeat + VS Code presence
+        if (-not (Hud-Enabled)) { $form.Close(); return }   # HUD switched off -> retire (toggle stays)
         if ($AliveFile) { try { [System.IO.File]::WriteAllText($AliveFile, (NowMs).ToString()) } catch {} }
         if ([PerPixelLayered]::FindWindowEndsWith("Visual Studio Code") -ne [IntPtr]::Zero) { $script:lastVs = NowMs }
         elseif ((NowMs) - $script:lastVs -gt 30000) { $form.Close(); return }   # VS Code gone -> retire
