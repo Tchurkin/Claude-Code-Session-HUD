@@ -63,19 +63,24 @@ function Recalc {
 Recalc
 $FORM_W = 520 + $GLOW*2     # generous canvas; we blit only the chip and move it
 $FORM_H = $script:CH + $GLOW*2
+$SLIVER = 9                 # width of the colored left edge left showing when a tab is stowed
+
+# A tab is never destroyed. Right-click STOWS it: it slides right into a drawer, leaving only its
+# colored edge peeking at the screen's right; clicking that edge slides it back out. The stow state
+# is remembered (a marker file) so the drawer stays where you left it across respawns.
+$script:stowMarker = [System.IO.Path]::ChangeExtension($StateFile, ".stow")
+$script:stowed = [System.IO.File]::Exists($script:stowMarker)
 
 $GAP = 8
 $script:bottomAnchor = $screen.Bottom - 44 - $GLOW       # sit above VS Code's status bar, bottom-right
 $script:curTop  = $script:bottomAnchor - $script:CH
 $script:target  = $script:curTop
 $script:lastTop = -99999
+$script:chipX   = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }  # drawer pos
 $script:tick = 0
 $script:closeReq = $false
 $script:hover = $false
 $script:active = $false       # our chat's window is focused -> keep the tab lit (the tab you're on)
-$script:hidden = $false       # right-click hides the tab until you return to its window / chat again
-$script:armed  = $false       # (hidden) we've since left the window, so refocusing it re-shows the tab
-$script:dismissAt = 0         # when the tab was hidden (ms), compared against state.present_ts
 $script:presentTs = 0         # last time the user was actively present in this chat (from state)
 $script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
 $script:winMiss   = 0         # consecutive window-not-found checks (same idea)
@@ -112,9 +117,9 @@ $render = {
     $borderA  = if ($lit) { 255 } else { 200 }
     $borderW  = if ($lit) { 1.9 } else { 1.2 }
     $winAlpha = if ($lit) { 255 } else { 240 }
-    if ($script:hidden) { $winAlpha = 0 }              # right-click-hidden: invisible but still alive
-    # The chip is right-aligned inside the (wide) transparent canvas; this is its left edge.
-    $cx = $FORM_W - $GLOW - $script:CW
+    # The chip's left edge inside the canvas; eases right (into the drawer) when stowed, so only
+    # its colored edge shows. Content past the canvas edge is clipped, leaving just that sliver.
+    $cx = [int]$script:chipX
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -176,7 +181,7 @@ $render = {
 
     # Hover hint: a small how-to-interact chip to the LEFT of the tab (only on real mouse hover).
     if ($script:hover) {
-        $tip = "Left-click: jump      Right-click: hide"
+        $tip = if ($script:stowed) { "Click to open" } else { "Left-click: jump      Right-click: stow" }
         $tw  = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
         $tbw = $tw + 18; $tbh = [int]$tipFont.Height + 8
         $tbx = $cx - 8 - $tbw
@@ -196,15 +201,18 @@ $render = {
     $bmp.Dispose()
 }
 
-# Left-click -> jump to that chat's window; right-click -> dismiss the badge.
+# Stowed: any click slides it back out. Out: left-click jumps to the chat's window, right-click
+# stows it into the drawer. Tabs are never destroyed either way.
 $form.Add_MouseDown({
     param($s, $e)
+    if ($script:stowed) {
+        $script:stowed = $false                          # open the drawer back up
+        try { Remove-Item -LiteralPath $script:stowMarker -ErrorAction SilentlyContinue } catch {}
+        return
+    }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
-        # Hide, don't destroy: the tab returns when you refocus its window or chat with it again.
-        $script:hidden = $true; $script:armed = $false; $script:hover = $false
-        $script:dismissAt = NowMsLocal
-        try { Stack-Sync $script:CH $false } catch {}   # release our slot so the others close the gap
-        & $render                                        # blit invisible immediately
+        $script:stowed = $true                           # slide into the drawer (only its edge stays)
+        try { [System.IO.File]::WriteAllText($script:stowMarker, "1") } catch {}
     } elseif ($script:Hwnd -ne 0) {
         try { [PerPixelLayered]::FocusWindow([IntPtr]$script:Hwnd) } catch {}
     }
@@ -219,7 +227,7 @@ $timer.Add_Tick({
     $script:tick++
     if (($script:tick % 20) -eq 1) {
         $now = NowMsLocal
-        try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while hidden)
+        try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while stowed)
         if (-not (Hud-Enabled)) { $script:closeReq = $true }                  # HUD switched off -> retire
         $st = Read-State
         if ($null -eq $st) {
@@ -252,14 +260,10 @@ $timer.Add_Tick({
             } else {
                 $script:winMiss = 0
             }
-            if ($changed -and -not $script:hidden) { & $render }
+            if ($changed) { & $render }
         }
-        if (-not $script:hidden) {
-            $ordered = Stack-Sync $script:CH $true            # heartbeat our slot + recompute stack order
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
-        } else {
-            try { Stack-Sync $script:CH $false } catch {}     # hidden: hold no stack slot
-        }
+        $ordered = Stack-Sync $script:CH $true                # stowed tabs still hold their stack slot (as slivers)
+        $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
     }
     if ($script:closeReq) { $form.Close(); return }
 
@@ -274,17 +278,11 @@ $timer.Add_Tick({
         } catch {}
     }
 
-    if ($script:hidden) {
-        if (-not $isOwn -and $fg -ne $form.Handle.ToInt64()) { $script:armed = $true }   # you've left the window
-        if (($script:armed -and $isOwn) -or ($script:presentTs -gt $script:dismissAt)) {
-            $script:hidden = $false; $script:active = $isOwn; & $render                   # returned / chatted -> restore
-        } else {
-            return                                                                        # stay hidden this tick
-        }
-    }
-
     if ($isOwn -ne $script:active) { $script:active = $isOwn; & $render }                 # active-tab highlight
 
+    $needRender = $false
+
+    # vertical: ease into the stack slot (slides the already-blitted surface, no redraw)
     $delta = $script:target - $script:curTop
     if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * 0.22 }
     $newTop = [int]$script:curTop
@@ -294,13 +292,21 @@ $timer.Add_Tick({
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
 
-    # Hover: light the chip + show the how-to hint while the cursor is over it (cursor-rect poll;
-    # MouseLeave is unreliable on layered windows). Re-render only when hover flips.
-    $chipL = $form.Left + ($FORM_W - $GLOW - $script:CW)
+    # horizontal: ease the chip toward its drawer position (out = fully shown, stowed = only the edge)
+    $tgtX = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }
+    $dx = $tgtX - $script:chipX
+    if ([Math]::Abs($dx) -lt 0.5) { if ($script:chipX -ne $tgtX) { $script:chipX = $tgtX; $needRender = $true } }
+    else { $script:chipX += $dx * 0.25; $needRender = $true }
+
+    # Hover over the VISIBLE part of the tab (cursor-rect poll; MouseLeave is unreliable here).
+    $visL = $form.Left + [int]$script:chipX
+    $visR = $form.Left + $FORM_W - $GLOW
     $chipT = $form.Top + $GLOW
     $cp = [System.Windows.Forms.Cursor]::Position
-    $over = ($cp.X -ge $chipL -and $cp.X -lt ($chipL + $script:CW) -and $cp.Y -ge $chipT -and $cp.Y -lt ($chipT + $script:CH))
-    if ($over -ne $script:hover) { $script:hover = $over; & $render }
+    $over = ($cp.X -ge $visL -and $cp.X -lt $visR -and $cp.Y -ge $chipT -and $cp.Y -lt ($chipT + $script:CH))
+    if ($over -ne $script:hover) { $script:hover = $over; $needRender = $true }
+
+    if ($needRender) { & $render }
 
     # Animate the indicator (~11 fps) while working/awaiting; 'done' stays static.
     if ((($script:State -eq "working") -or ($script:State -eq "waiting")) -and (($script:tick % 3) -eq 0)) {

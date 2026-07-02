@@ -454,7 +454,8 @@ def _gc_stale():
             continue
         try:
             if now - float(json.load(open(f, encoding="utf-8")).get("ts", 0)) > IDLE_MS:
-                for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive")):
+                for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive"),
+                          os.path.join(BADGE_DIR, sid8 + ".stow")):
                     try: os.remove(p)
                     except Exception: pass
         except Exception:
@@ -551,7 +552,8 @@ def _dedupe_window(session_id, hwnd):
     keeper = max(recent)[1]                          # newest ts owns this window's badge
     for ts, sid8, f in recent:
         if sid8 != keeper:
-            for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive")):
+            for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive"),
+                      os.path.join(BADGE_DIR, sid8 + ".stow")):
                 try: os.remove(p)
                 except Exception: pass
     return _sid8(session_id) == keeper
