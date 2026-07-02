@@ -180,17 +180,21 @@ $getFolder = {
     if ($fgCwd) { return $fgCwd } else { return $best }
 }
 
-# Open a NEW VS Code window on the same folder, so its files are right there and each session is
-# its own window. VS Code restores that folder's layout (Claude included if it was open there).
+# Open a NEW VS Code window on the SAME workspace folder (files right there), then open Claude as
+# an editor tab in it - so it's basically the current window with just a Claude tab. The folder
+# comes from `code --new-window <folder>`; Claude comes from the F13 -> "Open in New Tab" binding,
+# fired once the new window has focus. F13 is harmless if it lands anywhere else.
 $codeExe = (Get-Command code -ErrorAction SilentlyContinue).Source
 $openNew = {
-    if ($codeExe) {
-        $folder = & $getFolder
-        $codeArgs = if ($folder -and (Test-Path -LiteralPath $folder)) { @('--new-window', $folder) } else { @('--new-window') }
-        try { Start-Process -FilePath $codeExe -ArgumentList $codeArgs -WindowStyle Hidden } catch {}
+    $folder = & $getFolder
+    if ($codeExe -and $folder -and (Test-Path -LiteralPath $folder)) {
+        try { Start-Process -FilePath $codeExe -ArgumentList @('--new-window', $folder) -WindowStyle Hidden } catch {}
+        $seq = "Start-Sleep -Milliseconds 3500; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{F13}')"
+        try { Start-Process powershell -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-Command',$seq) -WindowStyle Hidden } catch {}
     } else {
+        # fallback: Claude's own "Open in New Window" (Ctrl+Alt+N binding)
         $h = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code")
-        if ($h -ne [IntPtr]::Zero) { [PerPixelLayered]::FocusWindow($h) }
+        if ($h -ne [IntPtr]::Zero) { [PerPixelLayered]::FocusWindow($h); Start-Sleep -Milliseconds 150; [System.Windows.Forms.SendKeys]::SendWait("^%n") }
     }
 }
 
