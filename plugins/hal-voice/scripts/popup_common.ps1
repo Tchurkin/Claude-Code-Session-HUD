@@ -151,8 +151,9 @@ function Set-StackNamespace($name) {
 }
 
 # ── master on/off flag ───────────────────────────────────────────────────────
-# The HUD's overlays poll Hud-Enabled and close themselves when the toggle button switches the
-# HUD off; the toggle button flips it with Set-HudEnabled. Stored in the plugin config.
+# The HUD's overlays poll Hud-Enabled and close themselves when the HUD is switched off. The flag
+# lives in the plugin config; the VS Code status-bar extension flips it (Set-HudEnabled is kept for
+# any in-process caller). Stored in the plugin config.
 $script:HalCfgPath = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "config.json"
 function Hud-Enabled {
     try {

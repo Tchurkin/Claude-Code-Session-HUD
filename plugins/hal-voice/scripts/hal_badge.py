@@ -35,7 +35,6 @@ BADGE_PS1   = os.path.join(hc.SCRIPTS_DIR, "badge.ps1")
 TINT_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_tint.ps1")
 BUTTON_PS1  = os.path.join(hc.SCRIPTS_DIR, "claude_button.ps1")
 POPUP_PS1   = os.path.join(hc.SCRIPTS_DIR, "popup.ps1")
-TOGGLE_PS1  = os.path.join(hc.SCRIPTS_DIR, "hal_toggle.ps1")
 IDLE_MS     = 20 * 60 * 1000     # auto-dismiss after this much chat inactivity
 TOPIC_EVERY = 90 * 1000          # recompute the "working on" label at most this often
 
@@ -692,10 +691,8 @@ def main():
     tp  = data.get("transcript_path")
 
     cfg = hc.load_config()
-    if os.name == "nt" and cfg.get("toggle", True):
-        _ensure_singleton("hal_toggle", TOGGLE_PS1)   # the on/off switch always runs, even when off
-    if not cfg.get("enabled", True):
-        return                                        # HUD switched off: draw nothing (overlays self-close)
+    if not cfg.get("enabled", True):                  # HUD switched off (via the VS Code status-bar
+        return                                        # extension or config): draw nothing, overlays self-close
 
     if ev == "UserPromptSubmit":
         fu     = _focus_summary(_recent_messages(tp) if tp else [], data.get("prompt"),

@@ -31,7 +31,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 | **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to hide it — it comes back when you refocus that window or send the chat a new prompt. Hover a badge (or the button) for a hint on what the clicks do. |
 | **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
 | **New-window button** | An always-on-top spark button; click it to open a **new chat in a new window** (so each chat is its own window and the click-to-jump lands precisely). |
-| **On/off toggle** | A tiny power button in the bottom-right corner turns the whole HUD off and back on (green = on, dim = off). When off, the badges/tint/button/cards all disappear and only the toggle remains, so you can flip it back. Prefer a real **VS Code status-bar button**? A companion extension in [`vscode-extension/`](vscode-extension/) adds one that flips the same switch. |
+| **On/off toggle** | Turn the whole HUD off and back on from a **VS Code status-bar button** — a companion extension in [`vscode-extension/`](vscode-extension/) (green = on, dim = off). When off, the badges/tint/button/cards all disappear; flip it back on and they return. (Under the hood it's a `enabled` flag in the config, so you can also toggle it by hand or from your own script.) |
 | **"Working on" cards** | A top-right card per chat, colored to that chat, showing its name and **a short summary of what it's doing** (e.g. *"fixing sim landing crash"*, *"adding servos to schematic"*) — it stays up while the chat works and turns to a brief **done** when it finishes. Hover for a hint; click to jump to that chat. |
 | **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — click it to jump to the chat, hover to keep it up. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
 | **Waiting-for-you alert** | When a background chat **finishes and is waiting on your reply**, a persistent top-right card tells you — so a chat that's done in another window doesn't sit there unnoticed. Click to jump; it clears once you reply. (The chat you're actively looking at just gets a quiet "done".) |
@@ -96,8 +96,7 @@ Claude Code will then refresh it at startup and prompt you to reload when there'
 
 | key | meaning |
 |---|---|
-| `enabled` | master on/off for the whole HUD; flipped by the corner toggle button (default true) |
-| `toggle` | show the small on/off toggle button in the bottom-right corner (default true) — *Windows* |
+| `enabled` | master on/off for the whole HUD; flipped by the VS Code status-bar extension (default true) |
 | `badge` | show the per-chat badges (default true) — *Windows* |
 | `window_tint` | color-accent the focused chat window (default true) — *Windows + VS Code* |
 | `button` | show the new-window button (default true) — *Windows* |

@@ -18,8 +18,7 @@ PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(SCRIPTS_DI
 CREATE_NO_WINDOW = 0x08000000   # Windows: don't flash a console window for child procs
 
 _DEFAULTS = {
-    "enabled":     True,    # master on/off for the whole HUD (flipped by the toggle button)
-    "toggle":      True,    # show the small on/off toggle button in the bottom-right corner
+    "enabled":     True,    # master on/off for the whole HUD (flip via the VS Code status-bar extension)
     "badge":       True,    # persistent per-chat color badge window (bottom-right)
     "window_tint": True,    # colored accent bar on the focused chat's VS Code window
     "button":      True,    # always-on-top button (new chat in a new window)

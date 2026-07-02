@@ -33,7 +33,7 @@ $form.TopMost         = $true
 $form.Width  = $FORM_W; $form.Height = $FORM_H
 # The button rides just above the badge ("chat tab") stack; at the corner when there are none.
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
-$dockBottom = $screen.Bottom - 16 - 44          # leave room for the on/off toggle in the very corner
+$dockBottom = $screen.Bottom - 16               # the button rides just above the tab stack, at the corner
 $GAPB = 8
 $script:curTop    = $dockBottom - $GLOW - $CH
 $script:targetTop = $script:curTop
