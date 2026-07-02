@@ -461,33 +461,29 @@ def _gc_stale():
 
 
 def _active_slots(exclude_sid):
-    """Color slots currently held by other, still-active sessions."""
+    """Color slots held by other, currently-relevant sessions. A slot counts as taken if that
+    session's badge is alive OR it was touched recently - NOT alive alone, so a live session whose
+    heartbeat briefly lapses (e.g. right after a reload) doesn't look 'free' and get its color
+    handed to a new chat. Being inclusive here is the safe side: worst case a new chat picks a
+    higher slot; the unsafe side is two chats sharing a color."""
     now  = time.time() * 1000
     ex   = _sid8(exclude_sid)
     used = set()
     for f in glob.glob(os.path.join(BADGE_DIR, "*.json")):
         sid8 = os.path.basename(f)[:-5]
-        if sid8 == ex or not _alive_fresh(sid8):
-            continue                                   # only a session with a live badge holds a color
+        if sid8 == ex:
+            continue
         try:
-            s = json.load(open(f, encoding="utf-8")).get("slot")
+            d = json.load(open(f, encoding="utf-8"))
         except Exception:
             continue
+        if not (_alive_fresh(sid8) or (now - float(d.get("ts", 0))) < IDLE_MS):
+            continue
+        s = d.get("slot")
         if s is not None:
             try: used.add(int(s))
             except Exception: pass
     return used
-
-
-def _assign_slot(session_id):
-    """The lowest slot not already taken by another open session, so a new chat gets the most
-    different color still available. Slots free up as sessions go idle and are GC'd, so the
-    palette stays tight around however many chats are actually live."""
-    used = _active_slots(session_id)
-    slot = 0
-    while slot in used:
-        slot += 1
-    return slot
 
 
 def _dedupe_window(session_id, hwnd):
@@ -527,9 +523,12 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     os.makedirs(BADGE_DIR, exist_ok=True)
     now  = int(time.time() * 1000)
     prev = _read_state(session_id)
+    used = _active_slots(session_id)                 # colors held by other open chats
     slot = prev.get("slot")
-    if slot is None:
-        slot = _assign_slot(session_id)              # first sighting -> claim the most distinct free color
+    if slot is None or int(slot) in used:            # unassigned, or colliding with another chat's color
+        slot = 0                                     # -> take the lowest free (most distinct) color; this
+        while slot in used:                          #    also self-heals an existing duplicate on next touch
+            slot += 1
     r, g, b = hc.slot_color(slot)
     proj   = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
     prev_h = int(prev.get("hwnd") or 0)
