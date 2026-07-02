@@ -25,7 +25,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 
 | Feature | What it does |
 |---|---|
-| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's own color. It stays put while the chat's window is open (it won't vanish from disuse), the tab for the window you're currently in stays lit, and **focusing a chat's window surfaces its tab** if it wasn't already showing. Sits just above VS Code's status bar so it doesn't cover the bottom-bar buttons. |
+| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's **own stable color** (remembered durably, so the same chat keeps its color across despawn/respawn; it only changes to break a clash with another live chat). It stays put while the chat's window is open (it won't vanish from disuse), the tab for the window you're currently in stays lit, and **focusing a chat's window surfaces its tab** if it wasn't already showing. Sits just above VS Code's status bar so it doesn't cover the bottom-bar buttons. |
 | **Live state** | The badge shows **✓ done**, a **breathing dot = working**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal. |
 | **Smart name** | The badge is labelled with a 1–3 word summary of what the chat is working on (via Claude), and it **re-checks on every prompt** — keeping the name while it still fits and updating it when the chat's focus shifts, so names don't go stale. |
 | **Click to jump** | Left-click a badge to focus that chat's VS Code window; right-click to hide it — it comes back when you refocus that window or send the chat a new prompt. Hover a badge (or the button) for a hint on what the clicks do. |

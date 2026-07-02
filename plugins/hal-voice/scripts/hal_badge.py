@@ -35,6 +35,7 @@ BADGE_PS1   = os.path.join(hc.SCRIPTS_DIR, "badge.ps1")
 TINT_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_tint.ps1")
 BUTTON_PS1  = os.path.join(hc.SCRIPTS_DIR, "claude_button.ps1")
 POPUP_PS1   = os.path.join(hc.SCRIPTS_DIR, "popup.ps1")
+SLOTS_PATH  = os.path.join(hc.DATA_DIR, "slots.json")   # durable per-chat color memory (sid -> slot)
 IDLE_MS     = 20 * 60 * 1000     # auto-dismiss after this much chat inactivity
 TOPIC_EVERY = 90 * 1000          # recompute the "working on" label at most this often
 
@@ -486,6 +487,51 @@ def _active_slots(exclude_sid):
     return used
 
 
+def _load_slots():
+    try:
+        return json.load(open(SLOTS_PATH, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_slots(m):
+    try:
+        os.makedirs(os.path.dirname(SLOTS_PATH), exist_ok=True)
+        tmp = SLOTS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        os.replace(tmp, SLOTS_PATH)
+    except Exception:
+        pass
+
+
+def _session_slot(session_id, used, prev_slot=None):
+    """The chat's stable color slot. Prefers the color it's had before - remembered durably (so it
+    survives despawn / respawn / state GC), falling back to the live state's slot - and keeps it
+    unless another *currently-open* chat holds that color, in which case it moves to the lowest free
+    one. So a chat's color is stable identity; it only ever changes to break a genuine clash."""
+    sid8 = _sid8(session_id)
+    m = _load_slots()
+    entry = m.get(sid8)
+    remembered = entry.get("slot") if isinstance(entry, dict) else entry
+    if remembered is None:
+        remembered = prev_slot
+    slot = remembered
+    if slot is None or int(slot) in used:              # never seen, or its color is taken by a live chat
+        slot = 0
+        while slot in used:
+            slot += 1
+    slot = int(slot)
+    if not isinstance(entry, dict) or entry.get("slot") != slot:   # persist only on change (low churn)
+        m[sid8] = {"slot": slot, "ts": int(time.time() * 1000)}
+        if len(m) > 300:                               # bound the registry: drop the oldest entries
+            old = sorted(m, key=lambda k: m[k].get("ts", 0) if isinstance(m[k], dict) else 0)
+            for k in old[:len(m) - 300]:
+                m.pop(k, None)
+        _save_slots(m)
+    return slot
+
+
 def _dedupe_window(session_id, hwnd):
     """One badge per VS Code window: keep the most-recently-active session for a given
     window and retire the rest (older tabs / churned or leftover sessions). Returns True if
@@ -523,12 +569,8 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     os.makedirs(BADGE_DIR, exist_ok=True)
     now  = int(time.time() * 1000)
     prev = _read_state(session_id)
-    used = _active_slots(session_id)                 # colors held by other open chats
-    slot = prev.get("slot")
-    if slot is None or int(slot) in used:            # unassigned, or colliding with another chat's color
-        slot = 0                                     # -> take the lowest free (most distinct) color; this
-        while slot in used:                          #    also self-heals an existing duplicate on next touch
-            slot += 1
+    used = _active_slots(session_id)                 # colors currently held by other open chats
+    slot = _session_slot(session_id, used, prev.get("slot"))   # this chat's stable, remembered color
     r, g, b = hc.slot_color(slot)
     proj   = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
     prev_h = int(prev.get("hwnd") or 0)
