@@ -71,6 +71,12 @@ $SLIVER = 9                 # width of the colored left edge left showing when a
 $script:stowMarker = [System.IO.Path]::ChangeExtension($StateFile, ".stow")
 $script:stowed = [System.IO.File]::Exists($script:stowMarker)
 
+# Drag-to-reorder: the tab's position in the stack is a persisted order key (lower = higher up).
+# Defaults to birth time so new tabs land at the bottom; dragging rewrites it.
+$script:ordMarker = [System.IO.Path]::ChangeExtension($StateFile, ".ord")
+$script:ord = try { [double]([System.IO.File]::ReadAllText($script:ordMarker)) } catch { [double]$script:BornMs }
+$script:StackOrd = $script:ord
+
 $GAP = 8
 $script:bottomAnchor = $screen.Bottom - 44 - $GLOW       # sit above VS Code's status bar, bottom-right
 $script:curTop  = $script:bottomAnchor - $script:CH
@@ -84,6 +90,10 @@ $script:active = $false       # our chat's window is focused -> keep the tab lit
 $script:presentTs = 0         # last time the user was actively present in this chat (from state)
 $script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
 $script:winMiss   = 0         # consecutive window-not-found checks (same idea)
+$script:maybeDrag = $false    # left button is down; still deciding click-vs-drag
+$script:dragging  = $false    # actively dragging this tab to reorder it
+$script:dragStartY = 0
+$script:grabOffset = 0        # cursor-to-form-top offset captured at grab, so the tab tracks smoothly
 
 $form = New-Object System.Windows.Forms.Form
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -213,10 +223,39 @@ $form.Add_MouseDown({
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         $script:stowed = $true                           # slide into the drawer (only its edge stays)
         try { [System.IO.File]::WriteAllText($script:stowMarker, "1") } catch {}
-    } elseif ($script:Hwnd -ne 0) {
-        try { [PerPixelLayered]::FocusWindow([IntPtr]$script:Hwnd) } catch {}
+        return
     }
+    # left button: a click jumps to the chat; a drag reorders the tab (decided on release)
+    $script:maybeDrag = $true; $script:dragging = $false
+    $script:dragStartY = [System.Windows.Forms.Cursor]::Position.Y
+    $script:grabOffset = [System.Windows.Forms.Cursor]::Position.Y - $form.Top
 })
+
+# On drop, set our order key so we sort into the gap where we were released; the others reflow.
+$dropReorder = {
+    try {
+        $ordered = Stack-Sync $script:CH $true
+        $myY = $form.Top + $script:CH/2
+        $slots = @(); $below = 0
+        foreach ($e in $ordered) {
+            $top = $script:bottomAnchor - $below - [int]$e.h
+            if ($e.id -ne $script:PopupId) {
+                $o = if ($null -ne $e.ord) { [double]$e.ord } else { [double]$e.ts }
+                $slots += [pscustomobject]@{ ord = $o; top = $top }
+            }
+            $below += [int]$e.h + $GAP
+        }
+        $aboveOrd = $null; $belowOrd = $null
+        foreach ($sl in ($slots | Sort-Object top)) {
+            if ($sl.top -lt $myY) { $aboveOrd = $sl.ord } elseif ($null -eq $belowOrd) { $belowOrd = $sl.ord }
+        }
+        if     ($null -ne $aboveOrd -and $null -ne $belowOrd) { $script:ord = ($aboveOrd + $belowOrd) / 2 }
+        elseif ($null -ne $belowOrd) { $script:ord = $belowOrd - 1000000 }   # dropped above everything
+        elseif ($null -ne $aboveOrd) { $script:ord = $aboveOrd + 1000000 }   # dropped below everything
+        $script:StackOrd = $script:ord
+        try { [System.IO.File]::WriteAllText($script:ordMarker, [string]$script:ord) } catch {}
+    } catch {}
+}
 $form.Add_Shown({ [PerPixelLayered]::Init($form.Handle); & $render })
 
 # One timer: ease position every frame (cheap), but only hit the shared registry / state
@@ -282,14 +321,35 @@ $timer.Add_Tick({
 
     $needRender = $false
 
+    # Drag to reorder: with the left button held, once you move, the tab follows the cursor; on
+    # release, a small move = a click (jump to the chat), a real drag = drop into the new slot.
+    if ($script:maybeDrag) {
+        $leftDown = ([System.Windows.Forms.Control]::MouseButtons -band [System.Windows.Forms.MouseButtons]::Left) -ne 0
+        $cy = [System.Windows.Forms.Cursor]::Position.Y
+        if ($leftDown) {
+            if (-not $script:dragging -and [Math]::Abs($cy - $script:dragStartY) -gt 5) { $script:dragging = $true }
+            if ($script:dragging) {
+                $script:curTop = $cy - $script:grabOffset
+                $nt = [int]$script:curTop
+                if ($nt -ne $script:lastTop) { $script:lastTop = $nt; $form.Top = $nt; [PerPixelLayered]::Move($form.Handle, $form.Left, $nt) }
+            }
+        } else {
+            $script:maybeDrag = $false
+            if ($script:dragging) { $script:dragging = $false; & $dropReorder }
+            elseif ($script:Hwnd -ne 0) { try { [PerPixelLayered]::FocusWindow([IntPtr]$script:Hwnd) } catch {} }
+        }
+    }
+
     # vertical: ease into the stack slot (slides the already-blitted surface, no redraw)
-    $delta = $script:target - $script:curTop
-    if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * 0.22 }
-    $newTop = [int]$script:curTop
-    if ($newTop -ne $script:lastTop) {
-        $script:lastTop = $newTop
-        $form.Top = $newTop
-        [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
+    if (-not $script:dragging) {
+        $delta = $script:target - $script:curTop
+        if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * 0.22 }
+        $newTop = [int]$script:curTop
+        if ($newTop -ne $script:lastTop) {
+            $script:lastTop = $newTop
+            $form.Top = $newTop
+            [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
+        }
     }
 
     # horizontal: ease the chip toward its drawer position (out = fully shown, stowed = only the edge)

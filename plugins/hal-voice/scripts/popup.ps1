@@ -141,9 +141,12 @@ $render = {
     $bmp.Dispose()
 }
 
-# Click -> focus the chat's window (if known) and dismiss.
+# Left-click -> jump to the chat's window and dismiss. Right-click -> just dismiss.
 $form.Add_MouseDown({
-    if ($Hwnd -ne 0) { try { [PerPixelLayered]::FocusWindow([IntPtr]$Hwnd) } catch {} }
+    param($s, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right -and $Hwnd -ne 0) {
+        try { [PerPixelLayered]::FocusWindow([IntPtr]$Hwnd) } catch {}
+    }
     $script:closeReq = $true
 })
 $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # never steal focus

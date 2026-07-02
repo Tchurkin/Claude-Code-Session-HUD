@@ -455,7 +455,8 @@ def _gc_stale():
         try:
             if now - float(json.load(open(f, encoding="utf-8")).get("ts", 0)) > IDLE_MS:
                 for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive"),
-                          os.path.join(BADGE_DIR, sid8 + ".stow")):
+                          os.path.join(BADGE_DIR, sid8 + ".stow"),
+                          os.path.join(BADGE_DIR, sid8 + ".ord")):
                     try: os.remove(p)
                     except Exception: pass
         except Exception:
@@ -553,7 +554,8 @@ def _dedupe_window(session_id, hwnd):
     for ts, sid8, f in recent:
         if sid8 != keeper:
             for p in (f, os.path.join(BADGE_DIR, sid8 + ".alive"),
-                      os.path.join(BADGE_DIR, sid8 + ".stow")):
+                      os.path.join(BADGE_DIR, sid8 + ".stow"),
+                      os.path.join(BADGE_DIR, sid8 + ".ord")):
                 try: os.remove(p)
                 except Exception: pass
     return _sid8(session_id) == keeper
@@ -605,7 +607,7 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": now, "color": [r, g, b], "slot": slot, "label": label, "hwnd": hwnd,
                        "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val,
-                       "present_ts": present_ts, "proj": proj}, f)
+                       "present_ts": present_ts, "proj": proj, "cwd": (str(cwd) if cwd else "")}, f)
         os.replace(tmp, sp)
     except Exception:
         return

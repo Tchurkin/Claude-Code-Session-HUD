@@ -131,19 +131,14 @@ $render = {
     $bpen = New-Object System.Drawing.Pen((CA 210 $acc), 1.3)
     $g.DrawPath($bpen, $cpath); $bpen.Dispose(); $cpath.Dispose()
 
-    # Claude-style spark: rays of two lengths radiating from the center.
+    # A simple plus (new chat).
     $cx = $GLOW + $OX + $CW/2; $cy = $GLOW + $CH/2
-    $penS = New-Object System.Drawing.Pen($acc, 2.4)
+    $penS = New-Object System.Drawing.Pen($acc, 3.0)
     $penS.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $penS.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
-    $rays = 12
-    for ($i = 0; $i -lt $rays; $i++) {
-        $ang = $i * (2 * [Math]::PI / $rays)
-        $len = if ($i % 2 -eq 0) { 12 } else { 6.5 }
-        $x1 = $cx + [Math]::Cos($ang) * 3.5; $y1 = $cy + [Math]::Sin($ang) * 3.5
-        $x2 = $cx + [Math]::Cos($ang) * (3.5 + $len); $y2 = $cy + [Math]::Sin($ang) * (3.5 + $len)
-        $g.DrawLine($penS, [float]$x1, [float]$y1, [float]$x2, [float]$y2)
-    }
+    $arm = 9
+    $g.DrawLine($penS, [float]($cx-$arm), [float]$cy, [float]($cx+$arm), [float]$cy)
+    $g.DrawLine($penS, [float]$cx, [float]($cy-$arm), [float]$cx, [float]($cy+$arm))
     $penS.Dispose()
 
     # Hover hint to the LEFT of the button, so it's clear this opens a NEW chat window.
@@ -168,12 +163,34 @@ $render = {
     $bmp.Dispose()
 }
 
+# Which folder to open in the new window: the chat whose window is focused, else the most
+# recently active chat. (Each chat records its cwd in its state file.)
+$getFolder = {
+    $fgL = 0; try { $fgL = ([PerPixelLayered]::GetForegroundWindow()).ToInt64() } catch {}
+    $best = $null; $bestTs = -1; $fgCwd = $null
+    try {
+        foreach ($f in [System.IO.Directory]::GetFiles($badgeDir, "*.json")) {
+            try { $d = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { continue }
+            if (-not $d.cwd) { continue }
+            if ($d.hwnd -and ([int64]$d.hwnd -eq $fgL)) { $fgCwd = [string]$d.cwd }
+            $ts = 0; try { $ts = [int64]$d.ts } catch {}
+            if ($ts -gt $bestTs) { $bestTs = $ts; $best = [string]$d.cwd }
+        }
+    } catch {}
+    if ($fgCwd) { return $fgCwd } else { return $best }
+}
+
+# Open a NEW VS Code window on the same folder, so its files are right there and each session is
+# its own window. VS Code restores that folder's layout (Claude included if it was open there).
+$codeExe = (Get-Command code -ErrorAction SilentlyContinue).Source
 $openNew = {
-    $h = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code")
-    if ($h -ne [IntPtr]::Zero) {
-        [PerPixelLayered]::FocusWindow($h)
-        Start-Sleep -Milliseconds 170
-        [System.Windows.Forms.SendKeys]::SendWait("^%n")   # Ctrl+Alt+N -> Open in New Window
+    if ($codeExe) {
+        $folder = & $getFolder
+        $codeArgs = if ($folder -and (Test-Path -LiteralPath $folder)) { @('--new-window', $folder) } else { @('--new-window') }
+        try { Start-Process -FilePath $codeExe -ArgumentList $codeArgs -WindowStyle Hidden } catch {}
+    } else {
+        $h = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code")
+        if ($h -ne [IntPtr]::Zero) { [PerPixelLayered]::FocusWindow($h) }
     }
 }
 

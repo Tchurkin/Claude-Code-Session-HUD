@@ -104,7 +104,8 @@ $script:PopupDir = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "p
 $script:SlotFile = Join-Path $script:PopupDir "$($script:PopupId).json"
 try { [System.IO.Directory]::CreateDirectory($script:PopupDir) | Out-Null } catch {}
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
-$script:BornMs = NowMs   # stable birth time = our sort key (newest on top)
+$script:BornMs  = NowMs             # stable birth time
+$script:StackOrd = $script:BornMs   # stack sort key (defaults to birth time; drag-reorder overrides it)
 
 # Heartbeat our own slot file, then return all live popups (newest first). When not alive,
 # delete our slot so the others close the gap.
@@ -115,7 +116,7 @@ function Stack-Sync($height, $alive) {
         return @()
     }
     try {
-        $me = [pscustomobject]@{ id = $script:PopupId; ts = $script:BornMs; h = [int]$height; beat = $now }
+        $me = [pscustomobject]@{ id = $script:PopupId; ts = $script:BornMs; ord = $script:StackOrd; h = [int]$height; beat = $now }
         [System.IO.File]::WriteAllText($script:SlotFile, ($me | ConvertTo-Json -Compress))
     } catch {}
 
@@ -129,7 +130,7 @@ function Stack-Sync($height, $alive) {
             } catch {}
         }
     } catch {}
-    return @($live | Sort-Object -Property @{ Expression = { [int64]$_.ts } } -Descending)
+    return @($live | Sort-Object -Property @{ Expression = { if ($null -ne $_.ord) { [double]$_.ord } else { [double]$_.ts } } } -Descending)
 }
 
 # Target top for THIS popup: base anchor + heights of every newer popup above it.
