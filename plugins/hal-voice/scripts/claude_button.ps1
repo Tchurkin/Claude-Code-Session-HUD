@@ -23,6 +23,7 @@ $FORM_W = $CW + $GLOW*2 + $TIP_W; $FORM_H = $CH + $GLOW*2
 $tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
 $script:hot = $false; $script:closeReq = $false; $script:tick = 0
+$script:pendLeaf = ''; $script:pendSrcH = 0; $script:pendUntil = 0; $script:pendSend = 0   # deferred "open Claude in the new window"
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -163,34 +164,41 @@ $render = {
     $bmp.Dispose()
 }
 
-# Which folder to open in the new window: the chat whose window is focused, else the most
-# recently active chat. (Each chat records its cwd in its state file.)
+# Which folder+source-window to open: the chat whose window is focused, else the most recent.
 $getFolder = {
     $fgL = 0; try { $fgL = ([PerPixelLayered]::GetForegroundWindow()).ToInt64() } catch {}
-    $best = $null; $bestTs = -1; $fgCwd = $null
+    $best = $null; $bestTs = -1; $fgSel = $null
     try {
         foreach ($f in [System.IO.Directory]::GetFiles($badgeDir, "*.json")) {
             try { $d = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { continue }
             if (-not $d.cwd) { continue }
-            if ($d.hwnd -and ([int64]$d.hwnd -eq $fgL)) { $fgCwd = [string]$d.cwd }
+            $sel = [pscustomobject]@{ cwd = [string]$d.cwd; hwnd = [int64]$d.hwnd }
+            if ($d.hwnd -and ([int64]$d.hwnd -eq $fgL)) { $fgSel = $sel }
             $ts = 0; try { $ts = [int64]$d.ts } catch {}
-            if ($ts -gt $bestTs) { $bestTs = $ts; $best = [string]$d.cwd }
+            if ($ts -gt $bestTs) { $bestTs = $ts; $best = $sel }
         }
     } catch {}
-    if ($fgCwd) { return $fgCwd } else { return $best }
+    if ($fgSel) { return $fgSel } else { return $best }
 }
 
-# Open a NEW VS Code window on the SAME workspace folder (files right there), then open Claude as
-# an editor tab in it - so it's basically the current window with just a Claude tab. The folder
-# comes from `code --new-window <folder>`; Claude comes from the F13 -> "Open in New Tab" binding,
-# fired once the new window has focus. F13 is harmless if it lands anywhere else.
-$codeExe = (Get-Command code -ErrorAction SilentlyContinue).Source
+# The real Code.exe - launching the code.cmd shim mangles folder paths that contain spaces.
+$codeCmd = (Get-Command code -ErrorAction SilentlyContinue).Source
+$codeExe = $null
+if ($codeCmd) {
+    $cand = Join-Path (Split-Path -Parent (Split-Path -Parent $codeCmd)) 'Code.exe'
+    $codeExe = if (Test-Path -LiteralPath $cand) { $cand } else { $codeCmd }
+}
+
+# Open the SAME workspace folder in a new VS Code window; then, once that new window (a DIFFERENT
+# VS Code window showing this folder) has focus, drop Claude into it as an editor tab via F13.
+# The waiting + F13 send is handled in the timer, so it targets the real new window, not a guess.
 $openNew = {
-    $folder = & $getFolder
-    if ($codeExe -and $folder -and (Test-Path -LiteralPath $folder)) {
-        try { Start-Process -FilePath $codeExe -ArgumentList @('--new-window', $folder) -WindowStyle Hidden } catch {}
-        $seq = "Start-Sleep -Milliseconds 3500; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{F13}')"
-        try { Start-Process powershell -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-Command',$seq) -WindowStyle Hidden } catch {}
+    $sel = & $getFolder
+    if ($codeExe -and $sel -and $sel.cwd -and (Test-Path -LiteralPath $sel.cwd)) {
+        try { Start-Process -FilePath $codeExe -ArgumentList @('--new-window', $sel.cwd) -WindowStyle Hidden } catch {}
+        $script:pendLeaf = Split-Path -Leaf $sel.cwd
+        $script:pendSrcH = [int64]$sel.hwnd
+        $script:pendUntil = (NowMs) + 20000
     } else {
         # fallback: Claude's own "Open in New Window" (Ctrl+Alt+N binding)
         $h = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code")
@@ -211,6 +219,24 @@ $timer.Interval = 30
 $timer.Add_Tick({
     if ($script:closeReq) { $form.Close(); return }
     $script:tick++
+
+    # Deferred "open Claude in the new window": wait until a DIFFERENT VS Code window showing this
+    # folder is foreground, give the extension a moment to init, then send F13 (-> Open in New Tab).
+    if ($script:pendUntil -gt 0) {
+        if ((NowMs) -gt $script:pendUntil) { $script:pendUntil = 0 }
+        else {
+            $fh = [PerPixelLayered]::GetForegroundWindow()
+            if ($fh -ne [IntPtr]::Zero -and $fh.ToInt64() -ne $script:pendSrcH) {
+                $ttl = ""; try { $ttl = [PerPixelLayered]::WindowTitle($fh) } catch {}
+                if ($ttl -and $ttl.EndsWith("Visual Studio Code") -and $ttl.Contains($script:pendLeaf)) {
+                    $script:pendUntil = 0; $script:pendSend = (NowMs) + 1200
+                }
+            }
+        }
+    } elseif ($script:pendSend -gt 0 -and (NowMs) -ge $script:pendSend) {
+        try { [System.Windows.Forms.SendKeys]::SendWait('{F13}') } catch {}
+        $script:pendSend = 0
+    }
     if (($script:tick % 4) -eq 1) {                  # ~every 120ms: recompute where the stack tops out
         $info = StackHeight; $cnt = $info[0]; $sum = $info[1]
         if ($cnt -eq 0) { $bBottom = $dockBottom }
