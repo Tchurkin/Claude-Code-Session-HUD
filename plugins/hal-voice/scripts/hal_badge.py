@@ -409,6 +409,27 @@ def _first_user_message(transcript_path):
     return None
 
 
+def _usage_pct(transcript_path, limit=200000):
+    """Rough context-window fill for this chat: the latest assistant turn's input-side tokens
+    (fresh + cached) as a percent of the context limit. Returns 0-100 or None."""
+    try:
+        for ln in reversed(_tail_lines(transcript_path)):
+            try:
+                o = json.loads(ln)
+            except Exception:
+                continue
+            m = o.get("message") if isinstance(o, dict) else None
+            u = m.get("usage") if isinstance(m, dict) else (o.get("usage") if isinstance(o, dict) else None)
+            if isinstance(u, dict):
+                tok = ((u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                       + (u.get("cache_creation_input_tokens") or 0))
+                if tok > 0:
+                    return max(0, min(100, int(round(100.0 * tok / limit))))
+    except Exception:
+        pass
+    return None
+
+
 def _compute_topic(transcript_path):
     # A coherent 1-3 word theme: the LLM summary if a key is available; else a keyword theme
     # from the chat's opening ask (its purpose), then recent messages. Never the raw last msg.
@@ -600,14 +621,15 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     branch = _git_branch(cwd) if capture_hwnd else (prev.get("branch") or "")   # feature/worktree branch
     reason_val = _short(reason, 30) if reason else (prev.get("reason") or "")    # what it's waiting on
     present_ts = now if capture_hwnd else float(prev.get("present_ts") or 0)      # last time the user was here
-                                                                                 # (drives un-hiding a dismissed tab)
+    usage = _usage_pct(transcript_path) if transcript_path else prev.get("usage")  # context-fill % for the usage bar
     sp = _state_path(session_id)
     try:
         tmp = sp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": now, "color": [r, g, b], "slot": slot, "label": label, "hwnd": hwnd,
                        "state": st, "label_ts": label_ts, "branch": branch, "reason": reason_val,
-                       "present_ts": present_ts, "proj": proj, "cwd": (str(cwd) if cwd else "")}, f)
+                       "present_ts": present_ts, "proj": proj, "cwd": (str(cwd) if cwd else ""),
+                       "usage": usage}, f)
         os.replace(tmp, sp)
     except Exception:
         return

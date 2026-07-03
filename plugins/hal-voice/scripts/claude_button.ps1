@@ -19,10 +19,16 @@ $CW = 22; $CH = 22; $GLOW = 10; $R = 6
 $TIP_W = 150                                                 # room to the LEFT for the hover hint
 $OX = $TIP_W                                                 # button x-origin inside the (wider) canvas
 $ACCENT = [System.Drawing.Color]::FromArgb(217, 119, 87)     # Claude clay/orange
-$FORM_W = $CW + $GLOW*2 + $TIP_W; $FORM_H = $CH + $GLOW*2
+# Session usage bar sits just above the + button (% text on top, bar below).
+$UW = 44; $UBAR_H = 5; $UPCT_H = 13; $GAP_UV = 7
+$USAGE_TOTAL = $UPCT_H + 2 + $UBAR_H
+$BY = $GLOW + $USAGE_TOTAL + $GAP_UV                          # the + button's top y inside the canvas
+$FORM_W = $CW + $GLOW*2 + $TIP_W; $FORM_H = $BY + $CH + $GLOW
 $tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
+$uFont   = New-Object System.Drawing.Font("Segoe UI", 8)
 
 $script:hot = $false; $script:closeReq = $false; $script:tick = 0
+$script:usagePct = -1     # this session's context-fill %, -1 = unknown
 $script:pendLeaf = ''; $script:pendSrcH = 0; $script:pendUntil = 0; $script:pendSend = 0   # deferred "open Claude in the new window"
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
@@ -38,7 +44,7 @@ $badgeDir = Join-Path $env:USERPROFILE ".claude\hal_voice\badges"   # per-chat s
 $badgePs1 = Join-Path $PSScriptRoot 'badge.ps1'
 $dockBottom = $screen.Bottom - 44               # above VS Code's status bar; button rides atop the tab stack
 $GAPB = 8
-$script:curTop    = $dockBottom - $GLOW - $CH
+$script:curTop    = $dockBottom - $BY - $CH
 $script:targetTop = $script:curTop
 $script:lastTop   = -99999
 $form.Left = $screen.Right - $CW - 16 - $GLOW - $TIP_W    # keep the button at the corner; canvas extends left
@@ -121,19 +127,19 @@ $render = {
     for ($sp = $GLOW; $sp -ge 1; $sp--) {
         $alpha = [int]($gbase * [Math]::Exp(-$sp * 0.34))
         if ($alpha -lt 4) { continue }
-        $gp = RoundedPath ($GLOW+$OX-$sp) ($GLOW-$sp) ($CW+$sp*2) ($CH+$sp*2) ([Math]::Min($R+$sp,16))
+        $gp = RoundedPath ($GLOW+$OX-$sp) ($BY-$sp) ($CW+$sp*2) ($CH+$sp*2) ([Math]::Min($R+$sp,16))
         $pen = New-Object System.Drawing.Pen((CA $alpha $acc), 1.5)
         $g.DrawPath($pen, $gp); $pen.Dispose(); $gp.Dispose()
     }
 
-    $cpath = RoundedPath ($GLOW+$OX) $GLOW $CW $CH $R
+    $cpath = RoundedPath ($GLOW+$OX) $BY $CW $CH $R
     $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(232, 20, 18, 17))
     $g.FillPath($bg, $cpath); $bg.Dispose()
     $bpen = New-Object System.Drawing.Pen((CA 210 $acc), 1.3)
     $g.DrawPath($bpen, $cpath); $bpen.Dispose(); $cpath.Dispose()
 
     # A simple plus (new chat).
-    $cx = $GLOW + $OX + $CW/2; $cy = $GLOW + $CH/2
+    $cx = $GLOW + $OX + $CW/2; $cy = $BY + $CH/2
     $penS = New-Object System.Drawing.Pen($acc, 2.2)
     $penS.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $penS.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
@@ -142,6 +148,25 @@ $render = {
     $g.DrawLine($penS, [float]$cx, [float]($cy-$arm), [float]$cx, [float]($cy+$arm))
     $penS.Dispose()
 
+    # Session usage: a small bar (context fill) with a % above it, right-aligned over the + button.
+    if ($script:usagePct -ge 0) {
+        $up   = [Math]::Min(100, $script:usagePct)
+        $barR = $GLOW + $OX + $CW                 # right edge lines up with the button
+        $barL = $barR - $UW
+        $barY = $GLOW + $UPCT_H + 2
+        $trk = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(210, 42, 42, 46))
+        $g.FillRectangle($trk, $barL, $barY, $UW, $UBAR_H); $trk.Dispose()
+        $uc = if ($up -ge 85) { [System.Drawing.Color]::FromArgb(240,80,70) }
+              elseif ($up -ge 60) { [System.Drawing.Color]::FromArgb(255,176,0) }
+              else { [System.Drawing.Color]::FromArgb(0,205,120) }
+        $fw = [int]($UW * $up / 100.0)
+        if ($fw -gt 0) { $fb = New-Object System.Drawing.SolidBrush $uc; $g.FillRectangle($fb, $barL, $barY, $fw, $UBAR_H); $fb.Dispose() }
+        $ptxt = "$up%"
+        $ptw  = [int][Math]::Ceiling($g.MeasureString($ptxt, $uFont).Width)
+        $pb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(222,222,226))
+        $g.DrawString($ptxt, $uFont, $pb, [float]($barR - $ptw), [float]($GLOW - 2)); $pb.Dispose()
+    }
+
     # Hover hint to the LEFT of the button, so it's clear this opens a NEW chat window.
     if ($script:hot) {
         $tip = "New chat window"
@@ -149,7 +174,7 @@ $render = {
         $tbw = $tw + 16; $tbh = 22
         $tbx = $GLOW + $OX - 10 - $tbw
         if ($tbx -lt 2) { $tbx = 2 }
-        $tby = $GLOW + [int](($CH - $tbh)/2)
+        $tby = $BY + [int](($CH - $tbh)/2)
         $tpath = RoundedPath $tbx $tby $tbw $tbh 5
         $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(238, 20, 18, 17))
         $g.FillPath($tbg, $tpath); $tbg.Dispose()
@@ -172,7 +197,8 @@ $getFolder = {
         foreach ($f in [System.IO.Directory]::GetFiles($badgeDir, "*.json")) {
             try { $d = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { continue }
             if (-not $d.cwd) { continue }
-            $sel = [pscustomobject]@{ cwd = [string]$d.cwd; hwnd = [int64]$d.hwnd }
+            $usg = if ($null -ne $d.usage) { [int]$d.usage } else { -1 }
+            $sel = [pscustomobject]@{ cwd = [string]$d.cwd; hwnd = [int64]$d.hwnd; usage = $usg }
             if ($d.hwnd -and ([int64]$d.hwnd -eq $fgL)) { $fgSel = $sel }
             $ts = 0; try { $ts = [int64]$d.ts } catch {}
             if ($ts -gt $bestTs) { $bestTs = $ts; $best = $sel }
@@ -241,7 +267,12 @@ $timer.Add_Tick({
         $info = StackHeight; $cnt = $info[0]; $sum = $info[1]
         if ($cnt -eq 0) { $bBottom = $dockBottom }
         else { $bBottom = $dockBottom - ($sum + ($cnt - 1) * $GAPB) - $GAPB }
-        $script:targetTop = [int]($bBottom - $GLOW - $CH)
+        $script:targetTop = [int]($bBottom - $BY - $CH)
+    }
+    if (($script:tick % 33) -eq 17) {                # ~every 1s: refresh the usage bar for the current chat
+        $sel = & $getFolder
+        $u = if ($sel) { [int]$sel.usage } else { -1 }
+        if ($u -ne $script:usagePct) { $script:usagePct = $u; & $render }
     }
     if (($script:tick % 33) -eq 0) {                 # ~every 1s: heartbeat + VS Code presence
         if (-not (Hud-Enabled)) { $form.Close(); return }   # HUD switched off -> retire (toggle stays)
@@ -261,7 +292,7 @@ $timer.Add_Tick({
 
     # Hover (cursor-rect poll; reliable on layered windows): light up + show the hint.
     $bl = $form.Left + $GLOW + $OX
-    $bt = $form.Top + $GLOW
+    $bt = $form.Top + $BY
     $cp = [System.Windows.Forms.Cursor]::Position
     $over = ($cp.X -ge $bl -and $cp.X -lt ($bl + $CW) -and $cp.Y -ge $bt -and $cp.Y -lt ($bt + $CH))
     if ($over -ne $script:hot) { $script:hot = $over; & $render }
