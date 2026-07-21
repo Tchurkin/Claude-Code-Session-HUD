@@ -29,10 +29,15 @@ $uFont   = New-Object System.Drawing.Font("Segoe UI", 8)
 
 $script:hot = $false; $script:closeReq = $false; $script:tick = 0
 $script:usagePct = -1     # this session's context-fill %, -1 = unknown
-# Deferred "open Claude in the new window": we snapshot the VS Code windows that exist before we
-# launch, then look for the ONE new handle (the just-opened window) and send F13 to it specifically.
-$script:pendLeaf = ''; $script:pendPre = @{}; $script:pendNewH = [IntPtr]::Zero
+# --- TEMP DEBUG: trace the + button flow to a log file (remove once fixed) ---
+$script:dbgFile = Join-Path $env:USERPROFILE ".claude\hal_voice\button_debug.log"
+function Dbg($m) { try { [System.IO.File]::AppendAllText($script:dbgFile, ("{0} {1}`r`n" -f (NowMs), $m)) } catch {} }
+Dbg "=== button process started, pid=$PID ==="
+# Deferred "open Claude in the new window": we snapshot the VS Code windows before F14 duplicates the
+# folder, then look for the ONE new handle (the just-opened window) and send F13 to it specifically.
+$script:pendPre = @{}; $script:pendNewH = [IntPtr]::Zero
 $script:pendUntil = 0; $script:pendSend = 0; $script:pendSendTries = 0
+$script:inTick = $false   # re-entrancy guard: SendKeys.SendWait pumps messages and can re-enter the timer tick
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -210,38 +215,41 @@ $getFolder = {
     if ($fgSel) { return $fgSel } else { return $best }
 }
 
-# The real Code.exe - launching the code.cmd shim mangles folder paths that contain spaces.
-$codeCmd = (Get-Command code -ErrorAction SilentlyContinue).Source
-$codeExe = $null
-if ($codeCmd) {
-    $cand = Join-Path (Split-Path -Parent (Split-Path -Parent $codeCmd)) 'Code.exe'
-    $codeExe = if (Test-Path -LiteralPath $cand) { $cand } else { $codeCmd }
-}
-
-# Open the SAME workspace folder in a new VS Code window; then, once that new window exists, drop
-# Claude into IT as an editor tab via F13. We snapshot the VS Code windows that exist BEFORE the
-# launch so the new one is unambiguous (its handle isn't in the snapshot) - a same-folder window has
-# an identical title, so matching by title alone would land F13 on the old window. The wait + focused
-# F13 send is handled in the timer, so it targets the real new window's handle, not the foreground.
+# Open a NEW chat in its OWN normal VS Code window. Two keystrokes, both bound in the user's
+# keybindings.json to commands that are no-ops on a real keyboard:
+#   F14 -> workbench.action.duplicateWorkspaceInNewWindow : opens the CURRENT folder in a brand-new
+#          normal window (with the Explorer/file tree). The `code` CLI can't do this - it just
+#          focuses the already-open window instead of duplicating it - and Claude's own
+#          "Open in New Window" makes a stripped Claude-only window with no file tree.
+#   F13 -> claude-vscode.editor.open : drops Claude into that new window as an editor tab.
+# We snapshot the VS Code windows before F14 so the new one is the handle that wasn't there; the
+# timer then focuses that exact window and sends F13 (targeting the handle, not the foreground, so
+# the tab can't land in the old window). getFolder gives us the source chat's window to duplicate.
 $openNew = {
     $sel = & $getFolder
-    if ($codeExe -and $sel -and $sel.cwd -and (Test-Path -LiteralPath $sel.cwd)) {
+    $src = [IntPtr]::Zero
+    if ($sel -and $sel.hwnd) { $src = [IntPtr][int64]$sel.hwnd }
+    if (-not [PerPixelLayered]::WindowExists($src)) { $src = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code") }
+    Dbg ("openNew: src={0}" -f $src.ToInt64())
+    if ($src -ne [IntPtr]::Zero) {
         $script:pendPre = @{}
-        try { foreach ($h in [PerPixelLayered]::ListWindowsEndsWith("Visual Studio Code")) { $script:pendPre[$h.ToInt64()] = $true } } catch {}
-        try { Start-Process -FilePath $codeExe -ArgumentList @('--new-window', $sel.cwd) -WindowStyle Hidden } catch {}
-        $script:pendLeaf = Split-Path -Leaf $sel.cwd
+        try { foreach ($h in [PerPixelLayered]::ListWindowsEndsWith("Visual Studio Code")) { $script:pendPre[$h.ToInt64()] = $true } } catch { Dbg "snapshot ERR $_" }
         $script:pendNewH = [IntPtr]::Zero
         $script:pendSendTries = 0
-        $script:pendUntil = (NowMs) + 20000
-    } else {
-        # fallback: Claude's own "Open in New Window" (Ctrl+Alt+N binding)
-        $h = [PerPixelLayered]::FindWindowEndsWith("Visual Studio Code")
-        if ($h -ne [IntPtr]::Zero) { [PerPixelLayered]::FocusWindow($h); Start-Sleep -Milliseconds 150; [System.Windows.Forms.SendKeys]::SendWait("^%n") }
+        # Focus the source window, then duplicate its folder into a new normal window (F14).
+        [PerPixelLayered]::ForceForeground($src) | Out-Null
+        Start-Sleep -Milliseconds 250
+        if ([PerPixelLayered]::GetForegroundWindow() -eq $src) {
+            [System.Windows.Forms.SendKeys]::SendWait('{F14}')
+            $script:pendUntil = (NowMs) + 20000
+            Dbg "openNew: sent F14, waiting for the new window"
+        } else { Dbg "openNew: could not focus source window; abort" }
     }
 }
 
 $form.Add_MouseDown({
     param($s, $e)
+    Dbg ("MouseDown button={0}" -f $e.Button)
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $script:closeReq = $true }
     else { & $openNew }
 })
@@ -252,40 +260,43 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 30
 $timer.Add_Tick({
     if ($script:closeReq) { $form.Close(); return }
+    if ($script:inTick) { return }     # SendKeys.SendWait (below) pumps the message queue, which re-enters
+    $script:inTick = $true             # this tick; without this guard that recursion overflows the stack.
+    try {
     $script:tick++
 
-    # Deferred "open Claude in the new window": find the NEW VS Code window (a handle that did not
-    # exist before we launched) showing this folder, give the extension a moment to init, then focus
-    # THAT window and send F13 (-> Open in New Tab). Targeting the handle - not the foreground - keeps
-    # the tab from landing in the old window if focus flickers or another window is up front.
+    # Deferred F13: find the NEW VS Code window (a handle that wasn't there before F14 duplicated the
+    # folder), give it a few seconds to load the workspace + Claude extension, then focus THAT window
+    # and send F13 (-> Open in New Tab). Targeting the handle - not the foreground - keeps the tab from
+    # landing in the old window. F14 creates exactly one window, so the first new handle is our target.
     if ($script:pendUntil -gt 0) {
-        if ((NowMs) -gt $script:pendUntil) { $script:pendUntil = 0 }        # gave up waiting
+        if ((NowMs) -gt $script:pendUntil) { $script:pendUntil = 0; Dbg "detect: TIMED OUT (no new window after F14)" }        # gave up waiting
         else {
             try {
                 foreach ($h in [PerPixelLayered]::ListWindowsEndsWith("Visual Studio Code")) {
                     if ($script:pendPre.ContainsKey($h.ToInt64())) { continue }   # pre-existing window
-                    $ttl = ""; try { $ttl = [PerPixelLayered]::WindowTitle($h) } catch {}
-                    if ($ttl -and $ttl.Contains($script:pendLeaf)) {             # our folder's new window, titled
-                        $script:pendNewH = $h; $script:pendUntil = 0
-                        $script:pendSend = (NowMs) + 1200                        # let the extension host spin up
-                        break
-                    }
+                    $script:pendNewH = $h; $script:pendUntil = 0
+                    $script:pendSend = (NowMs) + 3000                            # let the workspace + Claude ext load
+                    Dbg ("detect: MATCHED new hwnd={0} title=[{1}], will send F13 in 3s" -f $h.ToInt64(), [PerPixelLayered]::WindowTitle($h))
+                    break
                 }
-            } catch {}
+            } catch { Dbg "detect ERR $_" }
         }
     } elseif ($script:pendSend -gt 0 -and (NowMs) -ge $script:pendSend) {
         $h = $script:pendNewH
         if ($h -ne [IntPtr]::Zero -and [PerPixelLayered]::WindowExists($h)) {
             $fg = [PerPixelLayered]::ForceForeground($h)                        # bypass the foreground lock
+            Dbg ("send: ForceForeground({0}) -> fg={1} tries={2}" -f $h.ToInt64(), $fg, $script:pendSendTries)
             if ($fg) {
-                try { [System.Windows.Forms.SendKeys]::SendWait('{F13}') } catch {}
-                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero
+                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero          # clear BEFORE SendWait (it pumps -> re-entrant tick)
+                try { [System.Windows.Forms.SendKeys]::SendWait('{F13}'); Dbg "send: F13 sent" } catch { Dbg "send F13 ERR $_" }
             } elseif ($script:pendSendTries -ge 20) {
-                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero          # couldn't foreground it; bail
+                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero; Dbg "send: BAILED (couldn't foreground)"          # couldn't foreground it; bail
             } else {
                 $script:pendSendTries++; $script:pendSend = (NowMs) + 200        # retry shortly (window still init'ing)
             }
         } else {
+            Dbg "send: window vanished"
             $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero              # window vanished
         }
     }
@@ -322,6 +333,7 @@ $timer.Add_Tick({
     $cp = [System.Windows.Forms.Cursor]::Position
     $over = ($cp.X -ge $bl -and $cp.X -lt ($bl + $CW) -and $cp.Y -ge $bt -and $cp.Y -lt ($bt + $CH))
     if ($over -ne $script:hot) { $script:hot = $over; & $render }
+    } finally { $script:inTick = $false }
 })
 $timer.Start()
 
