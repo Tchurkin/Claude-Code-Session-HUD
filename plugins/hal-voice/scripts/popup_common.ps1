@@ -78,6 +78,22 @@ public class PerPixelLayered {
         }, IntPtr.Zero);
         return found;
     }
+    // ALL visible windows whose title ends with `suffix`. Used to snapshot which VS Code windows
+    // exist before launching a new one, so the freshly-created window (a handle not in the snapshot)
+    // can be identified unambiguously even when it shows the same folder (identical title).
+    public static IntPtr[] ListWindowsEndsWith(string suffix){
+        var list = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr l){
+            if(!IsWindowVisible(h)) return true;
+            int len = GetWindowTextLength(h);
+            if(len <= 0) return true;
+            var sb = new System.Text.StringBuilder(len+1);
+            GetWindowText(h, sb, len+1);
+            if(sb.ToString().EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) list.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
+    }
     public static void SetBitmap(IntPtr h, Bitmap bmp, int left, int top, byte opacity){
         IntPtr screen=GetDC(IntPtr.Zero), mem=CreateCompatibleDC(screen), hbmp=IntPtr.Zero, old=IntPtr.Zero;
         try {

@@ -29,7 +29,10 @@ $uFont   = New-Object System.Drawing.Font("Segoe UI", 8)
 
 $script:hot = $false; $script:closeReq = $false; $script:tick = 0
 $script:usagePct = -1     # this session's context-fill %, -1 = unknown
-$script:pendLeaf = ''; $script:pendSrcH = 0; $script:pendUntil = 0; $script:pendSend = 0   # deferred "open Claude in the new window"
+# Deferred "open Claude in the new window": we snapshot the VS Code windows that exist before we
+# launch, then look for the ONE new handle (the just-opened window) and send F13 to it specifically.
+$script:pendLeaf = ''; $script:pendPre = @{}; $script:pendNewH = [IntPtr]::Zero
+$script:pendUntil = 0; $script:pendSend = 0; $script:pendSendTries = 0
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -215,15 +218,20 @@ if ($codeCmd) {
     $codeExe = if (Test-Path -LiteralPath $cand) { $cand } else { $codeCmd }
 }
 
-# Open the SAME workspace folder in a new VS Code window; then, once that new window (a DIFFERENT
-# VS Code window showing this folder) has focus, drop Claude into it as an editor tab via F13.
-# The waiting + F13 send is handled in the timer, so it targets the real new window, not a guess.
+# Open the SAME workspace folder in a new VS Code window; then, once that new window exists, drop
+# Claude into IT as an editor tab via F13. We snapshot the VS Code windows that exist BEFORE the
+# launch so the new one is unambiguous (its handle isn't in the snapshot) - a same-folder window has
+# an identical title, so matching by title alone would land F13 on the old window. The wait + focused
+# F13 send is handled in the timer, so it targets the real new window's handle, not the foreground.
 $openNew = {
     $sel = & $getFolder
     if ($codeExe -and $sel -and $sel.cwd -and (Test-Path -LiteralPath $sel.cwd)) {
+        $script:pendPre = @{}
+        try { foreach ($h in [PerPixelLayered]::ListWindowsEndsWith("Visual Studio Code")) { $script:pendPre[$h.ToInt64()] = $true } } catch {}
         try { Start-Process -FilePath $codeExe -ArgumentList @('--new-window', $sel.cwd) -WindowStyle Hidden } catch {}
         $script:pendLeaf = Split-Path -Leaf $sel.cwd
-        $script:pendSrcH = [int64]$sel.hwnd
+        $script:pendNewH = [IntPtr]::Zero
+        $script:pendSendTries = 0
         $script:pendUntil = (NowMs) + 20000
     } else {
         # fallback: Claude's own "Open in New Window" (Ctrl+Alt+N binding)
@@ -246,22 +254,40 @@ $timer.Add_Tick({
     if ($script:closeReq) { $form.Close(); return }
     $script:tick++
 
-    # Deferred "open Claude in the new window": wait until a DIFFERENT VS Code window showing this
-    # folder is foreground, give the extension a moment to init, then send F13 (-> Open in New Tab).
+    # Deferred "open Claude in the new window": find the NEW VS Code window (a handle that did not
+    # exist before we launched) showing this folder, give the extension a moment to init, then focus
+    # THAT window and send F13 (-> Open in New Tab). Targeting the handle - not the foreground - keeps
+    # the tab from landing in the old window if focus flickers or another window is up front.
     if ($script:pendUntil -gt 0) {
-        if ((NowMs) -gt $script:pendUntil) { $script:pendUntil = 0 }
+        if ((NowMs) -gt $script:pendUntil) { $script:pendUntil = 0 }        # gave up waiting
         else {
-            $fh = [PerPixelLayered]::GetForegroundWindow()
-            if ($fh -ne [IntPtr]::Zero -and $fh.ToInt64() -ne $script:pendSrcH) {
-                $ttl = ""; try { $ttl = [PerPixelLayered]::WindowTitle($fh) } catch {}
-                if ($ttl -and $ttl.EndsWith("Visual Studio Code") -and $ttl.Contains($script:pendLeaf)) {
-                    $script:pendUntil = 0; $script:pendSend = (NowMs) + 1200
+            try {
+                foreach ($h in [PerPixelLayered]::ListWindowsEndsWith("Visual Studio Code")) {
+                    if ($script:pendPre.ContainsKey($h.ToInt64())) { continue }   # pre-existing window
+                    $ttl = ""; try { $ttl = [PerPixelLayered]::WindowTitle($h) } catch {}
+                    if ($ttl -and $ttl.Contains($script:pendLeaf)) {             # our folder's new window, titled
+                        $script:pendNewH = $h; $script:pendUntil = 0
+                        $script:pendSend = (NowMs) + 1200                        # let the extension host spin up
+                        break
+                    }
                 }
-            }
+            } catch {}
         }
     } elseif ($script:pendSend -gt 0 -and (NowMs) -ge $script:pendSend) {
-        try { [System.Windows.Forms.SendKeys]::SendWait('{F13}') } catch {}
-        $script:pendSend = 0
+        $h = $script:pendNewH
+        if ($h -ne [IntPtr]::Zero -and [PerPixelLayered]::WindowExists($h)) {
+            [PerPixelLayered]::FocusWindow($h)
+            if (([PerPixelLayered]::GetForegroundWindow()).ToInt64() -eq $h.ToInt64()) {
+                try { [System.Windows.Forms.SendKeys]::SendWait('{F13}') } catch {}
+                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero
+            } elseif ($script:pendSendTries -ge 15) {
+                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero          # focus never took; bail
+            } else {
+                $script:pendSendTries++; $script:pendSend = (NowMs) + 200        # retry the focus shortly
+            }
+        } else {
+            $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero              # window vanished
+        }
     }
     if (($script:tick % 4) -eq 1) {                  # ~every 120ms: recompute where the stack tops out
         $info = StackHeight; $cnt = $info[0]; $sum = $info[1]
