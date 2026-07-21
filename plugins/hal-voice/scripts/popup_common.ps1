@@ -23,6 +23,10 @@ public class PerPixelLayered {
     [DllImport("user32.dll", SetLastError=true)] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst, ref POINT pdst, ref SIZE ps, IntPtr src, ref POINT psrc, int key, ref BLENDFUNCTION bf, int flags);
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
@@ -45,6 +49,24 @@ public class PerPixelLayered {
     public static void Move(IntPtr h, int x, int y){ SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x1|0x4|0x10); }
     // Bring another window (a chat's VS Code window) to the front; restore if minimized.
     public static void FocusWindow(IntPtr h){ if (h == IntPtr.Zero) return; if (IsIconic(h)) ShowWindow(h, 9); SetForegroundWindow(h); }
+    // Force a window to the true foreground, bypassing Windows' foreground lock (a background
+    // process's plain SetForegroundWindow just flashes the taskbar). Attaches our input thread to
+    // the current foreground window's thread so the OS treats us as "the foreground process" for the
+    // duration, making SetForegroundWindow actually take. Returns whether the window is now foreground.
+    public static bool ForceForeground(IntPtr h){
+        if (h == IntPtr.Zero) return false;
+        if (IsIconic(h)) ShowWindow(h, 9);                       // SW_RESTORE
+        IntPtr fgw = GetForegroundWindow();
+        uint fgThread = GetWindowThreadProcessId(fgw, IntPtr.Zero);
+        uint me = GetCurrentThreadId();
+        bool attached = false;
+        if (fgThread != 0 && fgThread != me) attached = AttachThreadInput(fgThread, me, true);
+        BringWindowToTop(h);
+        bool ok = SetForegroundWindow(h);
+        ShowWindow(h, 5);                                        // SW_SHOW
+        if (attached) AttachThreadInput(fgThread, me, false);
+        return GetForegroundWindow() == h;
+    }
     // Make THIS window a click-through overlay (layered + transparent + no-activate + no taskbar).
     public static void InitClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x20|0x08000000|0x80); }
     // Add click-through WITHOUT forcing WS_EX_LAYERED (for Form.Opacity overlays that manage layering themselves).

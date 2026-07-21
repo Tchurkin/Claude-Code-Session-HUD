@@ -276,14 +276,14 @@ $timer.Add_Tick({
     } elseif ($script:pendSend -gt 0 -and (NowMs) -ge $script:pendSend) {
         $h = $script:pendNewH
         if ($h -ne [IntPtr]::Zero -and [PerPixelLayered]::WindowExists($h)) {
-            [PerPixelLayered]::FocusWindow($h)
-            if (([PerPixelLayered]::GetForegroundWindow()).ToInt64() -eq $h.ToInt64()) {
+            $fg = [PerPixelLayered]::ForceForeground($h)                        # bypass the foreground lock
+            if ($fg) {
                 try { [System.Windows.Forms.SendKeys]::SendWait('{F13}') } catch {}
                 $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero
-            } elseif ($script:pendSendTries -ge 15) {
-                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero          # focus never took; bail
+            } elseif ($script:pendSendTries -ge 20) {
+                $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero          # couldn't foreground it; bail
             } else {
-                $script:pendSendTries++; $script:pendSend = (NowMs) + 200        # retry the focus shortly
+                $script:pendSendTries++; $script:pendSend = (NowMs) + 200        # retry shortly (window still init'ing)
             }
         } else {
             $script:pendSend = 0; $script:pendNewH = [IntPtr]::Zero              # window vanished
