@@ -170,23 +170,32 @@ def burn_rate(hist):
 def pace(util, rate, mins_left):
     """Where this window is heading, as 0..1: 0 = coasting, 0.5 = lands exactly on the limit, 1 = out.
 
-    Two halves that meet at the same point. Under the limit, the scale is simply how full the window
-    will be when it resets, so idling at 30% reads low and idling at 90% does not - the colour can
-    never call a nearly-spent window relaxed. Over the limit, the scale becomes how EARLY you run
-    out: hitting it just as the window closes is that same 0.5, hitting it immediately is 1. Both
-    branches agree at projected == 100, so the colour moves smoothly through the crossover."""
+    The scale is your burn against what you can still afford - `sustainable` below, the rate that
+    spends exactly the rest of the window over exactly the time left in it. Half that rate is 0.25,
+    the rate itself is 0.5, and past it you run out early, where the scale becomes how EARLY: hitting
+    the limit just as the window closes is that same 0.5, hitting it immediately is 1. The branches
+    agree at ratio == 1 so the colour crosses over smoothly.
+
+    Deliberately says nothing about how full the window already is, only about where it is going. How
+    full it is is what the bar's own length says, and pricing it into the colour as well would both
+    duplicate that and blunt this: idle at 90% would read as a warning when the truthful answer is
+    that nothing is being spent. It goes red quickly enough on its own if you resume, because at 90%
+    the sustainable rate is tiny and almost any real work is a multiple of it."""
     if util is None:
         return None
     util = max(0.0, min(100.0, float(util)))
     if util >= 100.0:
-        return 1.0
+        return 1.0                                     # already out; nothing left to project
     if rate is None or mins_left is None:
         return None
     rate = max(0.0, float(rate))
     mins_left = max(0.0, float(mins_left))
-    projected = util + rate * mins_left
-    if projected <= 100.0 or rate <= 0 or mins_left <= 0:
-        return max(0.0, min(0.5, 0.5 * min(projected, 100.0) / 100.0))
+    if rate <= 0 or mins_left <= 0:
+        return 0.0                                     # not burning, or no window left to burn it in
+    sustainable = (100.0 - util) / mins_left           # points a minute you can still afford
+    ratio = rate / sustainable
+    if ratio <= 1.0:
+        return max(0.0, min(0.5, 0.5 * ratio))
     hit = (100.0 - util) / rate                        # minutes to the limit; less than mins_left
     return max(0.5, min(1.0, 0.5 + 0.5 * (1.0 - hit / mins_left)))
 

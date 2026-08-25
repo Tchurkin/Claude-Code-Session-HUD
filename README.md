@@ -170,14 +170,24 @@ The colour is that answer:
 
 | | |
 |---|---|
-| **Blue** | The burn does not get you there. The window resets with room to spare. |
-| **Green** | You land about on the limit as the window rolls over — spending it exactly, which is fine. |
-| **Amber → red** | You run out early, and the further along, the earlier. Red means you have most of the window still to go and not much budget left for it. |
+| **Blue** | The burn does not get you there. Idle is blue, however much of the window has already gone. |
+| **Green** | You are spending it exactly — at this rate you land on the limit just as the window rolls over. |
+| **Amber → red** | You run out early, and the further along, the earlier. |
 
-Two details that keep it honest. Idling never reads as relaxed when the window is nearly spent: the
-colour's floor rises with the percentage, so 90% used can't show blue even at a standstill. And until
-there are enough readings to fit a rate to — four spread over five minutes — the bar falls back to the
-plain thresholds rather than inventing a trend from two samples.
+The scale is your burn rate against the rate you can still afford: the one that would spend exactly
+what is left of the window over exactly the time left in it. Half that rate is a quarter of the way
+along, the rate itself is green, and past it the scale becomes how *early* you run out — hitting the
+limit just as the window closes is still green, hitting it immediately is full red. It is a
+continuous ramp, not four steps; the colours below are the corners it turns.
+
+The colour deliberately says nothing about how full the window already is, because that is what the
+bar's length is for. Pricing it in twice would blunt the colour, which could then no longer say
+"nothing is being spent" about a window where nothing is being spent. It goes red quickly enough on
+its own when you start again: at 90% used the affordable rate is tiny, so ordinary work is a large
+multiple of it and the colour is past green within about five minutes.
+
+Until there are enough readings to fit a rate to — four spread over five minutes — the bar falls back
+to the plain thresholds rather than inventing a trend from two samples.
 
 The reading only moves in whole percentage points, so the rate comes from a least-squares fit across
 every sample rather than the difference between the first and last, which at these step sizes would

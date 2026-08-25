@@ -113,11 +113,35 @@ check(hu.pace(30.0, None, 120.0) is None, "no rate yet means no claim about the 
 check(hu.pace(None, 0.5, 120.0) is None, "and no reading means no claim either")
 check(hu.pace(100.0, None, None) == 1.0, "a spent window is fully red however little else is known")
 
-# Idling: the colour still may not call a nearly-full window relaxed.
-low, high = hu.pace(30.0, 0.0, 120.0), hu.pace(90.0, 0.0, 120.0)
-check(abs(low - 0.15) < 1e-9, "idle at 30%% sits low on the ramp (got %r)" % low)
-check(abs(high - 0.45) < 1e-9, "idle at 90%% is nearly at the crossover (got %r)" % high)
-check(low < high, "and more spent is always further along")
+# Idling is blue at any percentage. The colour answers "am I going to run out of this window", and
+# with nothing being spent the answer is no however little is left. How much is already gone is what
+# the bar's own length says; pricing it into the colour as well would duplicate the bar and blunt
+# the colour, which would then be unable to say "nothing is happening" about a window where nothing
+# is happening.
+for used in (5.0, 30.0, 90.0, 99.0):
+    p = hu.pace(used, 0.0, 120.0)
+    check(p == 0.0, "idle at %g%% is fully blue (got %r)" % (used, p))
+check(hu.pace(90.0, 0.0, 5.0) == 0.0, "and so is a window minutes from resetting")
+
+# Green means "spending it exactly", whatever has already gone: the rate that lands you on the limit
+# as the window closes is the same statement about the future at 40% used as at 90%.
+for used, left in ((40.0, 120.0), (90.0, 120.0), (10.0, 30.0), (99.0, 300.0)):
+    sustainable = (100.0 - used) / left
+    p = hu.pace(used, sustainable, left)
+    check(abs(p - 0.5) < 1e-9,
+          "%g%% used at %.4f%%/min lands exactly on the limit (got %r)" % (used, sustainable, p))
+
+# Dropping that floor is only safe because the colour catches up fast when work resumes: at 90% the
+# sustainable rate is tiny, so ordinary work is a large multiple of it. Idle for twenty minutes, then
+# burn at 0.5%/min, and the fit has to carry the colour past the crossover within a few minutes.
+def _resume(t):
+    """Twenty-one one-minute samples: flat at 90%, then burning for the last `t` of them."""
+    return [[i * MIN, min(100.0, 90.0 + 0.5 * max(0, t - (20 - i)))] for i in range(21)]
+
+crossed = next((t for t in range(0, 13)
+                if (hu.pace(_resume(t)[-1][1], hu.burn_rate(_resume(t)), 120.0) or 0.0) > 0.5), None)
+check(crossed is not None and crossed <= 6,
+      "resuming work at 90%% goes past the crossover within 6 minutes (took %r)" % crossed)
 
 # The crossover: landing exactly on the limit as the window resets is 0.5 from either side.
 exact = hu.pace(40.0, 60.0 / 120.0, 120.0)                 # 40 + 0.5*120 = 100
@@ -144,8 +168,9 @@ for rate in [0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 20.0]:
 check(prev >= 0.98, "a wild burn rate saturates the ramp (got %r)" % prev)
 
 # A window about to roll over cannot be blown, however hard you are burning.
-check(hu.pace(60.0, 10.0, 0.0) == 0.3, "no time left means no time to overspend")
-print("pace: crossover at 0.5000, monotonic in burn, clamped to [0,1]")
+check(hu.pace(60.0, 10.0, 0.0) == 0.0, "no time left means no time to overspend")
+print("pace: idle is blue at any %%, crossover at 0.5000, monotonic in burn, red %d min after resuming"
+      % crossed)
 
 
 # -- 4. mins_until and the end-to-end projection ------------------------------------------------
@@ -273,6 +298,52 @@ check(sat(olive) < 0.55, "...and that floor is what a direct green-to-red blend 
                          % sat(olive))
 print("ramp: 101 steps, worst jump %d/255, worst saturation %.2f at pace %.2f"
       % (worst_jump, worst_sat, worst_at / 100.0))
+
+# -- 7. durations stay in units you can picture --------------------------------------------------
+# The weekly window is routinely six days out. "150h 12m" is a number you have to divide before it
+# means anything; "6d 6h" is a length of time. Same extract-and-run approach as the ramp.
+def _ps_function(name):
+    """One PowerShell function out of hal_meter.ps1, by matching its braces."""
+    i = src.index("function %s" % name)
+    depth, j = 0, src.index("{", i)
+    for k in range(j, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[i:k + 1]
+    raise AssertionError("unbalanced braces reading %s out of hal_meter.ps1" % name)
+
+
+probe2 = os.path.join(tmp, "durations.ps1")
+with open(probe2, "w", encoding="utf-8") as f:
+    f.write(_ps_function("MinsLong") + "\n" + _ps_function("ResetShort") + "\n")
+    f.write("foreach ($m in @(0,5,59,60,90,100,155,1439,1440,1500,9000,10079)) "
+            "{ Write-Output ('{0}|{1}' -f $m, (MinsLong $m)) }\n")
+    f.write("$iso = [datetime]::UtcNow.AddMinutes(9000).ToString('o')\n"
+            "Write-Output ('short|{0}' -f (ResetShort $iso))\n")
+r2 = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-File", probe2],
+                    capture_output=True, text=True)
+check(r2.returncode == 0, "the duration helpers run: %s" % (r2.stderr or "")[:400])
+got = dict(l.split("|", 1) for l in r2.stdout.strip().splitlines() if "|" in l)
+
+check(got["0"] == "any moment", "zero reads as 'any moment' (got %r)" % got["0"])
+check(got["59"] == "59 min", "under an hour stays in minutes (got %r)" % got["59"])
+check(got["90"] == "1h 30m", "under a day is hours and minutes (got %r)" % got["90"])
+# PowerShell's [int] rounds to nearest, so these two are where a truncating cast is mandatory.
+check(got["100"] == "1h 40m", "an hour and forty is not two hours (got %r)" % got["100"])
+check(got["155"] == "2h 35m", "nor two thirty-five three hours (got %r)" % got["155"])
+check(got["1440"] == "1d 0h", "a full day rolls into days (got %r)" % got["1440"])
+check(got["9000"] == "6d 6h", "and 150 hours is six and a bit days (got %r)" % got["9000"])
+check(got["10079"] == "6d 23h", "just under a week (got %r)" % got["10079"])
+check(got["short"] == "6d6h", "the compact headline form agrees (got %r)" % got["short"])
+
+# The actual complaint: no reading may ever show two dozen hours or more.
+for k, v in got.items():
+    m = re.match(r"^(\d+)h", v)
+    check(not m or int(m.group(1)) < 24, "%s minutes rendered as %r, which is 24h or more" % (k, v))
+print("durations: %s, %s, %s - nothing over 23h" % (got["90"], got["1440"], got["9000"]))
 
 import shutil                                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)

@@ -24,7 +24,7 @@ if (-not $created) { exit }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $GLOW = 10
-$TIP_W = 300                                       # room to the LEFT for the hover hint
+$TIP_W = 520                                       # room to the LEFT for the hover hint
 $OX = $TIP_W
 $UW = 62                                           # bar width
 $UPCT_H = 15                                       # room for the percentage text
@@ -170,13 +170,21 @@ function ResetShort($iso) {
         $mins = [int]((([datetime]$iso).ToUniversalTime() - [datetime]::UtcNow).TotalMinutes)
         if ($mins -le 0) { return "now" }
         if ($mins -lt 60) { return "${mins}min" }
-        return "{0}h{1:00}m" -f [int]($mins/60), ($mins % 60)
+        $h = [int][Math]::Floor($mins / 60)              # see MinsLong: [int] would round up
+        if ($h -lt 24) { return "{0}h{1:00}m" -f $h, ($mins % 60) }
+        return "{0}d{1}h" -f [int][Math]::Floor($h / 24), ($h % 24)
     } catch { return "" }
 }
+# Days once there are more than a day of them: the weekly window is often 150-odd hours out, and
+# "6d 6h" is a length of time you can picture where "150h 12m" is a number you have to divide.
 function MinsLong($mins) {
     if ($mins -le 0) { return "any moment" }
     if ($mins -lt 60) { return "$mins min" }
-    return "{0}h {1}m" -f [int]($mins/60), ($mins % 60)
+    # Floor, not [int]: PowerShell's int cast rounds to NEAREST, so [int](100/60) is 2 and an hour
+    # and forty minutes rendered as "2h 40m". Wrong for any reading past the half hour.
+    $h = [int][Math]::Floor($mins / 60)
+    if ($h -lt 24) { return "{0}h {1}m" -f $h, ($mins % 60) }
+    return "{0}d {1}h" -f [int][Math]::Floor($h / 24), ($h % 24)
 }
 function ResetIn($iso) {
     if (-not $iso) { return "" }
@@ -231,24 +239,38 @@ $render = {
     }
 
     if ($script:hot -and $script:sessionPct -ge 0) {
+        # Built as clauses in order of importance, then trimmed from the least important end until
+        # what is left fits the room beside the bar. Measuring beats sizing it by eye: the same
+        # string is a different width in a different font or at a different DPI, and the old fixed
+        # box quietly cut the end off rather than telling anyone. The weekly window goes first - it
+        # is the least binding of the three - and the session line always survives.
+        $lead = "session $($script:sessionPct)%"
         $sIn = ResetIn $script:sessionResets
-        $wIn = ResetIn $script:weeklyResets
-        $tip = "session $($script:sessionPct)%"
-        if ($sIn) { $tip += " - resets in $sIn" }
+        if ($sIn) { $lead += " - resets in $sIn" }
+        if ($script:stale) { $lead = "(last known) " + $lead }
+        $parts = @($lead)
         # The bar's colour is a glance; this is the sentence behind it.
         if ($script:pace -ge 0) {
             if ($script:hitMins -ge 0 -and $script:pace -gt 0.5) {
-                $tip += "     limit in ~$(MinsLong $script:hitMins)"
+                $parts += "limit in ~$(MinsLong $script:hitMins)"
             } elseif ($script:projected -ge 0) {
-                $tip += "     on pace for $($script:projected)%"
+                $parts += "on pace for $($script:projected)%"
             }
         }
         if ($script:weeklyPct -ge 0) {
-            $tip += "     weekly $($script:weeklyPct)%"
-            if ($wIn) { $tip += " - $wIn" }
+            $wk = "weekly $($script:weeklyPct)%"
+            $wIn = ResetIn $script:weeklyResets
+            if ($wIn) { $wk += " - $wIn" }
+            $parts += $wk
         }
-        if ($script:stale) { $tip = "(last known) " + $tip }
+        $room = $GLOW + $OX - 12                       # all the space left of the bar, less a margin
+        $tip = $parts -join "     "
         $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
+        while ($parts.Count -gt 1 -and ($tw + 18) -gt $room) {
+            $parts = @($parts[0..($parts.Count - 2)])
+            $tip = $parts -join "     "
+            $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
+        }
         $tbw = $tw + 18; $tbh = [int]$tipFont.Height + 8
         $tbx = $GLOW + $OX - 10 - $tbw
         if ($tbx -lt 2) { $tbx = 2 }
