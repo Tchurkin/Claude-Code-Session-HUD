@@ -32,6 +32,26 @@ kept = hu._keep(list(h), [T0 + 3 * MIN, 0.5], "reset-B", "reset-A")
 check(kept == [[T0 + 3 * MIN, 0.5]],
       "the reset time moving on drops everything before it (got %r)" % kept)
 
+# The API recomputes resets_at from the instant it is asked, so the same window arrives with a
+# slightly different timestamp every minute. These three are real consecutive readings. Comparing
+# them as text made every poll look like a rollover, which wiped the history each time and left the
+# burn rate permanently unknown - the meter fell back to thresholds forever and looked fine doing it.
+JITTER = ["2026-08-26T01:00:00.405709+00:00",
+          "2026-08-26T01:00:00.034031+00:00",
+          "2026-08-26T00:59:59.604980+00:00"]
+for a in JITTER:
+    for b in JITTER:
+        check(hu.same_window(a, b), "%s and %s are the same window" % (a, b))
+check(not hu.same_window(JITTER[0], "2026-08-26T06:00:00.000000+00:00"),
+      "but five hours later is genuinely the next one")
+
+acc = []
+for i, iso in enumerate(JITTER * 3):
+    prev = JITTER[(i - 1) % len(JITTER)] if i else None
+    acc = hu._keep(acc, [T0 + i * MIN, 10.0 + i], iso, prev)
+check(len(acc) == 9, "so nine jittering polls accumulate nine samples, not one (got %d)" % len(acc))
+check(hu.burn_rate(acc) is not None, "and a rate can actually be fitted to them")
+
 # A light day: the window rolls over from 2% to 1%. Far too small a fall for the cliff below to
 # notice, so the reset time is the only thing that gives it away - and a leftover sample from the
 # old window would sit in the fit as if it were this one's.

@@ -37,6 +37,7 @@ MIN_SAMPLES    = 4
 MIN_SPAN_MS    = 5 * 60 * 1000
 MAX_SAMPLES    = 240         # backstop; the window trim is what normally bounds this
 WINDOW_DROP    = 3.0         # a fall this size means a new window, not a rounding wobble
+WINDOW_TOL_S   = 120.0       # reset times this close are the same window (the API's jitters by ~1s)
 
 
 def _token():
@@ -106,6 +107,25 @@ def mins_until(iso):
         return None
 
 
+def same_window(a, b, tol_s=WINDOW_TOL_S):
+    """Whether two reset timestamps mean the same window.
+
+    Not string equality, which is the obvious thing and is wrong: the API works resets_at out from
+    the instant it is asked, so the sub-second part moves on every single poll while the window has
+    not changed at all - 01:00:00.405709, then 01:00:00.034031, then 00:59:59.604980. Comparing the
+    text would call every poll a rollover, throw the history away each time, and leave the burn rate
+    permanently unknown. A real rollover moves this by hours, so a couple of minutes of slack
+    separates the two cleanly."""
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    ta, tb = mins_until(a), mins_until(b)
+    if ta is None or tb is None:
+        return False                                  # unparseable: fall back to the text compare
+    return abs(ta - tb) * 60.0 <= tol_s
+
+
 def _keep(hist, sample, resets, prev_resets):
     """The samples that still describe the window we are in now.
 
@@ -115,7 +135,7 @@ def _keep(hist, sample, resets, prev_resets):
     reset time or omit it - whenever the reading itself falls by more than a rounding wobble."""
     ts, util = sample
     hist = [h for h in hist if isinstance(h, (list, tuple)) and len(h) == 2]
-    if resets and prev_resets and resets != prev_resets:
+    if resets and prev_resets and not same_window(resets, prev_resets):
         hist = []
     elif hist and util < hist[-1][1] - WINDOW_DROP:
         hist = []
