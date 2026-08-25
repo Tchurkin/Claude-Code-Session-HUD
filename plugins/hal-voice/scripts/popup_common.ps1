@@ -9,7 +9,7 @@
 #    (each re-asserts itself every beat, so a lost write self-heals on the next frame).
 
 # ── per-pixel-alpha layered window ─────────────────────────────────────────────
-$src = @"
+$script:PplSource = @"
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -47,8 +47,17 @@ public class PerPixelLayered {
     public static void Init(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED); }
     // Move the window with no resize/redraw - the layered surface slides with it (cheap).
     public static void Move(IntPtr h, int x, int y){ SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x1|0x4|0x10); }
-    // Bring another window (a chat's VS Code window) to the front; restore if minimized.
-    public static void FocusWindow(IntPtr h){ if (h == IntPtr.Zero) return; if (IsIconic(h)) ShowWindow(h, 9); SetForegroundWindow(h); }
+    // Bring another window (a chat's VS Code window) to the front; restore it if minimized, and
+    // un-hide it if it has been hidden. A window can end up hidden-but-alive (VS Code hides one
+    // mid-reload, say) - the editor then considers that folder open and quietly focuses something
+    // you cannot see, so the folder appears impossible to open. Clicking its tab should always get
+    // you there, whatever state the window is in.
+    public static void FocusWindow(IntPtr h){
+        if (h == IntPtr.Zero) return;
+        if (IsIconic(h)) ShowWindow(h, 9);                    // SW_RESTORE
+        else if (!IsWindowVisible(h)) ShowWindow(h, 5);       // SW_SHOW
+        SetForegroundWindow(h);
+    }
     // Force a window to the true foreground, bypassing Windows' foreground lock (a background
     // process's plain SetForegroundWindow just flashes the taskbar). Attaches our input thread to
     // the current foreground window's thread so the OS treats us as "the foreground process" for the
@@ -67,13 +76,20 @@ public class PerPixelLayered {
         if (attached) AttachThreadInput(fgThread, me, false);
         return GetForegroundWindow() == h;
     }
+    // Put (and keep) a window in the always-on-top band. Rewriting GWL_EXSTYLE drops the topmost
+    // state that Form.TopMost established - the window stays exactly where it was drawn but sits
+    // BEHIND everything, which looks precisely like "the overlay isn't being drawn at all". Every
+    // style change below re-asserts it, and overlays re-assert periodically: other apps going
+    // full-screen or topmost can push us out of that band later.
+    public static void MakeTopmost(IntPtr h){ SetWindowPos(h, new IntPtr(-1), 0,0,0,0, 0x1|0x2|0x10); }  // NOSIZE|NOMOVE|NOACTIVATE
+    public static bool IsTopmost(IntPtr h){ return (GetWindowLong(h, GWL_EXSTYLE) & 0x8) != 0; }
     // Make THIS window a click-through overlay (layered + transparent + no-activate + no taskbar).
-    public static void InitClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x20|0x08000000|0x80); }
+    public static void InitClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x20|0x08000000|0x80); MakeTopmost(h); }
     // Add click-through WITHOUT forcing WS_EX_LAYERED (for Form.Opacity overlays that manage layering themselves).
-    public static void AddClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x20|0x08000000|0x80); }
+    public static void AddClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x20|0x08000000|0x80); MakeTopmost(h); }
     // Don't steal foreground when shown/clicked (WS_EX_NOACTIVATE) - so notification popups
     // don't yank focus off the chat window (which would drop the window-tint bar).
-    public static void NoActivate(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x08000000); }
+    public static void NoActivate(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x08000000); MakeTopmost(h); }
     public static bool Minimized(IntPtr h){ return IsIconic(h); }
     public static bool WindowExists(IntPtr h){ return h != IntPtr.Zero && IsWindow(h); }
     // Title text of a window (for matching a chat's window by project name when its handle drifts).
@@ -116,6 +132,18 @@ public class PerPixelLayered {
         }, IntPtr.Zero);
         return list.ToArray();
     }
+    // Publish a small file so readers see either the old contents or the new, never a torn read.
+    // These files are written several times a second and read by every other overlay; a plain
+    // WriteAllText truncates first, and a reader landing in that window sees an empty file.
+    public static void AtomicWrite(string path, string text){
+        string tmp = path + ".w" + System.Diagnostics.Process.GetCurrentProcess().Id;
+        System.IO.File.WriteAllText(tmp, text);
+        try { System.IO.File.Replace(tmp, path, null); }          // atomic when the target exists
+        catch {
+            try { System.IO.File.Move(tmp, path); }               // first write: no target yet
+            catch { try { System.IO.File.Copy(tmp, path, true); System.IO.File.Delete(tmp); } catch {} }
+        }
+    }
     public static void SetBitmap(IntPtr h, Bitmap bmp, int left, int top, byte opacity){
         IntPtr screen=GetDC(IntPtr.Zero), mem=CreateCompatibleDC(screen), hbmp=IntPtr.Zero, old=IntPtr.Zero;
         try {
@@ -131,7 +159,16 @@ public class PerPixelLayered {
     }
 }
 "@
-try { Add-Type -TypeDefinition $src -ReferencedAssemblies System.Drawing, System.Windows.Forms } catch {}
+try { Add-Type -TypeDefinition $script:PplSource -ReferencedAssemblies System.Drawing, System.Windows.Forms } catch {}
+if (-not ('PerPixelLayered' -as [type])) {          # several helpers can compile this at once and lose
+    Start-Sleep -Milliseconds 400
+    try { Add-Type -TypeDefinition $script:PplSource -ReferencedAssemblies System.Drawing, System.Windows.Forms } catch {}
+}
+# Every overlay draws through this type. When the compile loses, the failure used to be swallowed:
+# the helper still ran, still heartbeated, and every frame threw where nobody could see it - a window
+# tint that looked perfectly alive and never painted anything. Helpers check this and exit instead,
+# so the supervisor notices the stale heartbeat and starts a working one.
+$script:PplReady = [bool]('PerPixelLayered' -as [type])
 
 # ── cross-process stacking registry ────────────────────────────────────────────
 # Each popup owns ONE tiny file (popups\<id>.json) that it alone writes - so there is no
@@ -139,10 +176,128 @@ try { Add-Type -TypeDefinition $src -ReferencedAssemblies System.Drawing, System
 # itself). Readers just glob the folder. Files whose heartbeat went stale = crashed popups.
 $script:PopupId  = [Guid]::NewGuid().ToString()
 $script:PopupDir = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "popups"
-$script:SlotFile = Join-Path $script:PopupDir "$($script:PopupId).json"
+$script:SlotFile = Join-Path $script:PopupDir "$($script:PopupId).slot"
 try { [System.IO.Directory]::CreateDirectory($script:PopupDir) | Out-Null } catch {}
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
+
+# Heartbeat for a supervised overlay: timestamp AND pid. Write it at the END of a frame, never the
+# start - a helper whose drawing throws every frame would otherwise keep reporting itself healthy
+# while painting nothing, and since each holds a named mutex, the replacements the supervisor
+# spawned would exit on startup and the HUD would stay broken forever. The pid lets the supervisor
+# clear a wedged incumbent out of the way.
+# Keep an overlay in the always-on-top band.
+#
+# Setting Form.TopMost before Show() does NOT reliably produce WS_EX_TOPMOST - a form created
+# off-screen comes up without it - and a bare SetWindowPos(HWND_TOPMOST) doesn't take on these
+# windows either. Re-assigning the WinForms property does, because the setter re-applies the z-order
+# through WinForms' own bookkeeping. The failure is invisible: the overlay draws perfectly, at the
+# right size, in the right place, just *underneath* the window it is supposed to sit on - which
+# looks exactly like it was never drawn.
+function Assert-Topmost($form) {
+    try {
+        if (-not [PerPixelLayered]::IsTopmost($form.Handle)) { $form.TopMost = $false; $form.TopMost = $true }
+    } catch {}
+}
+
+# Clicking ANY of the HUD's surfaces for a chat - its tab, its "working on" card, its "needs you"
+# card - should land you in that chat, not merely in front of the window that contains it. A window
+# holds several chats and only one is in front. We raise the window ourselves (Win32) and leave a
+# request for the companion VS Code extension, which is inside that window and can bring the chat's
+# tab forward and focus its input. Without the extension installed you still get the window.
+function Jump-ToChat($chat, $hwnd, $sid) {
+    # Resolve where to go NOW, not from what was true when the caller was drawn. A status card can
+    # sit on screen for many minutes and its target is a snapshot: if the chat's window was rebound
+    # in the meantime - which happens as soon as the HUD learns which window really holds it - the
+    # card would still send you to the window it was bound to when the card appeared. The tabs never
+    # had this problem because they re-read this file constantly; now the cards do too.
+    if ($sid) {
+        try {
+            $st = Read-JsonFile (Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice\badges") "$sid.json")
+            if ($st) {
+                if ($st.tab)       { $chat = [string]$st.tab }
+                elseif ($st.title) { $chat = [string]$st.title }
+                if ($st.hwnd)      { $hwnd = [int64]$st.hwnd }
+            }
+        } catch {}
+    }
+    if ($chat) {
+        try {
+            $req  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "focus.json"
+            $body = [pscustomobject]@{ title = [string]$chat; sid = [string]$sid; ts = (NowMs) } | ConvertTo-Json -Compress
+            $tmp  = $req + ".tmp"
+            [System.IO.File]::WriteAllText($tmp, $body)
+            [System.IO.File]::Copy($tmp, $req, $true)     # every window sees it; only the owner acts
+            [System.IO.File]::Delete($tmp)
+        } catch {}
+    }
+    if ($hwnd -and ([int64]$hwnd) -ne 0) {
+        try { [PerPixelLayered]::FocusWindow([IntPtr][int64]$hwnd) } catch {}
+    }
+}
+
+# Read a file WITHOUT locking out whoever is writing it. These little state files are rewritten
+# several times a second by other processes; a plain ReadAllText opens with FileShare.Read, which
+# denies writers for the duration. The visible symptom was tabs twitching: a reader and a writer
+# collide, the reader sees an error, that tab drops out of the stack for one pass and everything
+# below it slides up and then back down. (It can also make the Python side's state write fail.)
+function Read-TextShared($path) {
+    $fs = $null; $sr = $null
+    try {
+        $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open,
+                                              [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs)
+        return $sr.ReadToEnd()
+    } finally {
+        if ($sr) { $sr.Dispose() } elseif ($fs) { $fs.Dispose() }
+    }
+}
+
+# Draw text with a crisp dark outline behind it. The overlays float over whatever happens to be on
+# screen, so text that isn't sitting on one of our own dark chips has no idea what colour its
+# background is - light grey on a white editor is invisible.
+#
+# Stroked from the glyph OUTLINE, not by stamping the string at a ring of offsets: repeated
+# anti-aliased draws pile up soft edges and read as a smudge rather than an outline, which is
+# exactly how the first attempt looked. One path, stroked with a round-joined pen and then filled,
+# gives an even border at any size.
+#
+# $align 'right' puts the text's right edge at $x - handy for right-aligned readouts, and exact,
+# because it measures the path's real bounds instead of trusting string metrics to agree.
+function Draw-OutlinedText($g, $text, $font, $color, $x, $y, [single]$weight = 3, [string]$align = 'left') {
+    if (-not $text) { return }
+    $path = $null; $pen = $null; $br = $null
+    try {
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $em = [single]($font.SizeInPoints * $g.DpiY / 72.0)
+        $sf = [System.Drawing.StringFormat]::GenericTypographic
+        $path.AddString($text, $font.FontFamily, [int]$font.Style, $em,
+                        (New-Object System.Drawing.PointF 0, 0), $sf)
+        $b = $path.GetBounds()
+        $dx = if ($align -eq 'right') { $x - ($b.X + $b.Width) } else { $x - $b.X }
+        $m = New-Object System.Drawing.Drawing2D.Matrix
+        $m.Translate([single]$dx, [single]($y - $b.Y))
+        $path.Transform($m); $m.Dispose()
+        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(235, 0, 0, 0)), $weight
+        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        $g.DrawPath($pen, $path)
+        $br = New-Object System.Drawing.SolidBrush $color
+        $g.FillPath($br, $path)
+    } catch {
+    } finally {
+        if ($br) { $br.Dispose() }; if ($pen) { $pen.Dispose() }; if ($path) { $path.Dispose() }
+    }
+}
+
+function Write-Beat($path) {
+    if (-not $path) { return }
+    try { [PerPixelLayered]::AtomicWrite($path, "$(NowMs) $PID") } catch {}
+}
 $script:BornMs  = NowMs             # stable birth time
+$script:slotCache = @{}             # last good read per slot file (see Stack-Sync)
+$script:SLOT_LIVE_MS = 2500        # beat age at which an overlay counts as gone (beats every 600ms)
+$script:SLOT_READ_GRACE = 5000     # how long a last-good entry stands in for unreadable files
 $script:StackOrd = $script:BornMs   # stack sort key (defaults to birth time; drag-reorder overrides it)
 
 # Heartbeat our own slot file, then return all live popups (newest first). When not alive,
@@ -154,18 +309,50 @@ function Stack-Sync($height, $alive) {
         return @()
     }
     try {
-        $me = [pscustomobject]@{ id = $script:PopupId; ts = $script:BornMs; ord = $script:StackOrd; h = [int]$height; beat = $now }
-        [System.IO.File]::WriteAllText($script:SlotFile, ($me | ConvertTo-Json -Compress))
+        [PerPixelLayered]::AtomicWrite($script:SlotFile,
+            ("{0} {1} {2} {3} {4}" -f $script:PopupId, $script:BornMs, $script:StackOrd, [int]$height, $now))
     } catch {}
 
     $live = New-Object System.Collections.ArrayList
     try {
-        foreach ($f in [System.IO.Directory]::GetFiles($script:PopupDir, "*.json")) {
+        # Walk the files on disk UNION the ones we've seen before. An atomic replace makes the file
+        # briefly disappear from the directory listing, and a path that isn't listed never reaches
+        # the grace check below - so the entry silently vanished for a poll, every tab under it slid
+        # up a slot, and slid back when it reappeared. That was the jitter.
+        $paths = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($x in [System.IO.Directory]::GetFiles($script:PopupDir, "*.slot")) { [void]$paths.Add($x) }
+        foreach ($x in @($script:slotCache.Keys)) { [void]$paths.Add($x) }
+        foreach ($f in $paths) {
+            $o = $null
             try {
-                $o = ([System.IO.File]::ReadAllText($f) | ConvertFrom-Json)
-                if ($o -and $o.id -and (($now - [int64]$o.beat) -lt 1500)) { [void]$live.Add($o) }
-                elseif (($now - [int64]$o.beat) -ge 5000) { [System.IO.File]::Delete($f) }  # GC a crashed popup
-            } catch {}
+                $p = (Read-TextShared $f).Trim() -split ' '
+                if ($p.Count -ge 5) {
+                    $o = [pscustomobject]@{ id = $p[0]; ts = [double]$p[1]; ord = [double]$p[2]
+                                            h = [int]$p[3]; beat = [int64]$p[4]; seen = $now }
+                    $script:slotCache[$f] = $o
+                }
+            } catch { }
+            if ($null -eq $o) {
+                # Couldn't read it this instant - it's being replaced, or briefly locked. That says
+                # nothing about whether that overlay is alive, so don't let it evict the entry: hold
+                # the last good one as live for a grace period. Letting the cached BEAT age out
+                # instead meant a run of failed reads silently dropped a tab from this process's view
+                # of the stack, and everything below it slid up a slot and back - the jitter that
+                # survived the first fix. Death is still detected the honest way, by a readable file
+                # whose beat has stopped moving.
+                $o = $script:slotCache[$f]
+                if ($null -eq $o) { continue }
+                if (($now - $o.seen) -lt $script:SLOT_READ_GRACE) { [void]$live.Add($o); continue }
+                $script:slotCache.Remove($f)          # unreadable for too long: let it go
+                continue
+            }
+            if (($now - $o.beat) -lt $script:SLOT_LIVE_MS) { [void]$live.Add($o) }
+            elseif (($now - $o.beat) -ge 5000) {
+                try { [System.IO.File]::Delete($f); $script:slotCache.Remove($f) } catch {}
+            }
+        }
+        foreach ($old in [System.IO.Directory]::GetFiles($script:PopupDir, "*.json")) {   # old format
+            try { [System.IO.File]::Delete($old) } catch {}          # leftovers from the JSON format
         }
     } catch {}
     return @($live | Sort-Object -Property @{ Expression = { if ($null -ne $_.ord) { [double]$_.ord } else { [double]$_.ts } } } -Descending)
@@ -185,7 +372,7 @@ function Stack-TargetTop($baseTop, $gap, $ordered) {
 # stack among themselves without interfering with the transient popups.
 function Set-StackNamespace($name) {
     $script:PopupDir = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") $name
-    $script:SlotFile = Join-Path $script:PopupDir "$($script:PopupId).json"
+    $script:SlotFile = Join-Path $script:PopupDir "$($script:PopupId).slot"
     try { [System.IO.Directory]::CreateDirectory($script:PopupDir) | Out-Null } catch {}
 }
 
@@ -194,22 +381,40 @@ function Set-StackNamespace($name) {
 # lives in the plugin config; the VS Code status-bar extension flips it (Set-HudEnabled is kept for
 # any in-process caller). Stored in the plugin config.
 $script:HalCfgPath = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "config.json"
+
+# This file is shared with Python and with the VS Code extension, so it must be plain UTF-8 with NO
+# byte-order mark: `JSON.parse` and `json.load` both choke on one. Windows PowerShell's
+# `Set-Content -Encoding utf8` writes a BOM and `Get-Content` without -Encoding reads UTF-8 as ANSI
+# (mangling any non-ASCII on the way back out), so go through .NET, which does neither.
+function Read-JsonFile($path) {
+    try { return (Read-TextShared $path).TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { return $null }
+}
+function Write-JsonFile($path, $obj) {
+    $json = $obj | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($path, $json)     # UTF-8, no BOM
+}
+
+$script:cfgMt = [datetime]::MinValue
+$script:cfgCache = $null
 function Hud-Enabled {
+    # Polled about once a second by every overlay; re-parsing the config each time is pure waste,
+    # so only re-read it when the file's timestamp moves.
     try {
-        $c = Get-Content -LiteralPath $script:HalCfgPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        if ($c -and ($c.PSObject.Properties.Name -contains 'enabled')) { return [bool]$c.enabled }
-    } catch {}
+        $mt = [System.IO.File]::GetLastWriteTimeUtc($script:HalCfgPath)
+        if ($mt -ne $script:cfgMt) { $script:cfgCache = Read-JsonFile $script:HalCfgPath; $script:cfgMt = $mt }
+    } catch { }
+    $c = $script:cfgCache
+    if ($c -and ($c.PSObject.Properties.Name -contains 'enabled')) { return [bool]$c.enabled }
     return $true
 }
 function Set-HudEnabled($val) {
     try {
         [void][System.IO.Directory]::CreateDirectory((Split-Path $script:HalCfgPath))
-        $c = $null
-        try { $c = Get-Content -LiteralPath $script:HalCfgPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+        $c = Read-JsonFile $script:HalCfgPath
         if (-not $c) { $c = [pscustomobject]@{} }
         if ($c.PSObject.Properties.Name -contains 'enabled') { $c.enabled = [bool]$val }
         else { $c | Add-Member -NotePropertyName enabled -NotePropertyValue ([bool]$val) }
-        ($c | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $script:HalCfgPath -Encoding utf8
+        Write-JsonFile $script:HalCfgPath $c
     } catch {}
 }
 

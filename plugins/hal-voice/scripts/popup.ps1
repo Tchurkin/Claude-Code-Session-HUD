@@ -6,7 +6,9 @@ param(
     [int]   $AccentB    = 80,
     [int64] $Hwnd       = 0,                    # click -> focus this chat's window
     [int]   $DurationMs = 9000,                 # auto-dismiss (paused while hovered)
-    [string]$PidFile    = ""                    # when set, record our PID so a chat can replace its own card
+    [string]$PidFile    = "",                   # when set, record our PID so a chat can replace its own card
+    [string]$Chat       = "",                   # the chat's editor-tab label: click switches to it
+    [string]$Sid        = ""
 )
 
 # An on-screen "a session needs you" card we draw ourselves - always-on-top, can't be
@@ -17,6 +19,7 @@ param(
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'popup_common.ps1')
+if (-not $script:PplReady) { exit 1 }   # no drawing type -> exit so the supervisor respawns a working one
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $ACCENT = [System.Drawing.Color]::FromArgb($AccentR, $AccentG, $AccentB)
@@ -38,15 +41,27 @@ $CH = $PAD_T + $titleH + $GAP_TB + $bodyH + $PAD_T
 $FORM_W = $CW + $GLOW*2 + $TIP_W
 $FORM_H = $CH + $GLOW*2
 
+# Announce ourselves to the other cards NOW - before the window exists. A new card used to appear
+# at the top anchor while the card already there was still sitting in that exact spot, so it looked
+# like the old one blinked out and reappeared lower. Registering first means they are already
+# gliding down by the time we fade in.
+[void](Stack-Sync $CH $true)
+
 $script:hover     = $false
 $script:fade      = 1.0
+$FADE_MS          = 10000       # how long the fade-out itself takes - long and gradual, so a card
+                                # drifts out of your attention instead of blinking away, and you have
+                                # plenty of time to catch it (hovering brings it straight back)
 $script:startTick = [Environment]::TickCount
+$script:bornTick  = [Environment]::TickCount
+$INTRO_MS         = 320         # slide-in + fade-up, so the card arrives instead of appearing
+$script:intro     = 0.0
 $script:tick      = 0
 $script:closeReq  = $false
 
 $GAP = 8
 $script:baseTop   = $screen.Top + 30 - $GLOW
-$script:curTop    = $script:baseTop
+$script:curTop    = $script:baseTop - 22      # start above our slot and glide down into it
 $script:targetTop = $script:baseTop
 $script:lastTop   = -99999
 
@@ -78,7 +93,7 @@ $render = {
     $bgShade  = if ($script:hover) { 40 }  else { 17 }
     $borderA  = if ($script:hover) { 255 } else { 175 }
     $winBase  = if ($script:hover) { 255 } else { 240 }
-    $winAlpha = [int]([Math]::Max(0, [Math]::Min(255, $winBase * $script:fade)))
+    $winAlpha = [int]([Math]::Max(0, [Math]::Min(255, $winBase * $script:fade * $script:intro)))
 
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -141,24 +156,30 @@ $render = {
     $bmp.Dispose()
 }
 
-# Left-click -> jump to the chat's window and dismiss. Right-click -> just dismiss.
+# Left-click -> jump to the chat itself (its window, and its tab within it) and dismiss.
+# Right-click -> just dismiss.
 $form.Add_MouseDown({
     param($s, $e)
-    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right -and $Hwnd -ne 0) {
-        try { [PerPixelLayered]::FocusWindow([IntPtr]$Hwnd) } catch {}
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) {
+        Jump-ToChat $Chat $Hwnd $Sid      # same jump as clicking the chat's tab
     }
     $script:closeReq = $true
 })
 $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # never steal focus
+$form.Add_Shown({ Assert-Topmost $form })                                   # ...but stay on top
 $form.Add_Shown({
     [PerPixelLayered]::Init($form.Handle); & $render
-    if ($PidFile) { try { [System.IO.File]::WriteAllText($PidFile, $PID.ToString()) } catch {} }
+    if ($PidFile) { try { [System.IO.File]::WriteAllText($PidFile, "$PID $($script:SlotFile)") } catch {} }
 })
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 20
 $timer.Add_Tick({
     $script:tick++
+    if ($script:intro -lt 1.0) {
+        $script:intro = [Math]::Min(1.0, ([Environment]::TickCount - $script:bornTick) / [double]$INTRO_MS)
+        $needIntroRender = $true
+    } else { $needIntroRender = $false }
     if (($script:tick % 6) -eq 1) {
         $ordered = Stack-Sync $CH $true
         $script:targetTop = Stack-TargetTop $script:baseTop $GAP $ordered
@@ -171,9 +192,21 @@ $timer.Add_Tick({
     $cp = [System.Windows.Forms.Cursor]::Position
     $cardL = $form.Left + $GLOW + $OX; $cardT = $newTop + $GLOW
     $over = ($cp.X -ge $cardL -and $cp.X -lt ($cardL + $CW) -and $cp.Y -ge $cardT -and $cp.Y -lt ($cardT + $CH))
-    $needRender = $false
+    $needRender = $needIntroRender
     if ($over -ne $script:hover) { $script:hover = $over; $needRender = $true }
     if ($over) { $script:startTick = [Environment]::TickCount }   # keep it up while hovered
+
+    # Follow the chat's colour rather than the one we were spawned with. A card can sit here for
+    # many minutes, and a chat's accent can move under it (it shifts to break a clash with another
+    # live chat, and the whole palette shifts if the legibility floor changes) - a card still
+    # wearing the old colour points at the wrong tab.
+    if ($Sid -and (($script:tick % 50) -eq 7)) {
+        $st = Read-JsonFile (Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice\badges") "$Sid.json")
+        if ($st -and $st.color -and $st.color.Count -ge 3) {
+            $c = [System.Drawing.Color]::FromArgb([int]$st.color[0], [int]$st.color[1], [int]$st.color[2])
+            if ($c.ToArgb() -ne $ACCENT.ToArgb()) { $script:ACCENT = $c; $needRender = $true }
+        }
+    }
 
     if ($newTop -ne $script:lastTop) {
         $script:lastTop = $newTop
@@ -181,11 +214,18 @@ $timer.Add_Tick({
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
 
-    # lifecycle: hold for DurationMs, then fade out over ~0.4s
+    # Lifecycle: hold for DurationMs, then fade out gently over FADE_MS. The fade is computed from
+    # the clock rather than counted down per tick, so it takes the same time however often we run.
+    # Hovering restores the card to full strength and restarts the hold - previously it only froze
+    # the countdown, so catching a card mid-fade left it sitting there half transparent.
     $elapsed = [Environment]::TickCount - $script:startTick
-    if ($elapsed -gt $DurationMs) {
-        $script:fade -= 0.05
-        if ($script:fade -le 0) { $script:closeReq = $true } else { $needRender = $true }
+    if ($over) {
+        if ($script:fade -lt 1.0) { $script:fade = 1.0; $needRender = $true }
+    }
+    elseif ($elapsed -gt $DurationMs) {
+        $f = 1.0 - (($elapsed - $DurationMs) / [double]$FADE_MS)
+        if ($f -le 0) { $script:closeReq = $true }
+        elseif ([Math]::Abs($f - $script:fade) -gt 0.01) { $script:fade = $f; $needRender = $true }
     }
     if ($script:closeReq) { $form.Close(); return }
     if ($needRender) { & $render }

@@ -1,12 +1,14 @@
 param(
     [Parameter(Mandatory=$true)][string]$StateFile,   # JSON {ts, color:[r,g,b], label} written by hooks
     [Parameter(Mandatory=$true)][string]$AliveFile,   # we heartbeat here so the controller won't respawn us
-    [int]$IdleMs = 1200000                             # auto-dismiss after this much chat inactivity (20 min)
+    [int]$IdleMs = 1200000                             # vestigial: a tab now lives exactly as long as
+                                                       # its chat is open (see hal_sessions.py)
 )
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'popup_common.ps1')
+if (-not $script:PplReady) { exit 1 }   # no drawing type -> exit so the supervisor respawns a working one
 Set-StackNamespace 'badges_stack'                      # stack slots live apart from the controller's state files in 'badges'
 
 # Exactly one badge per chat: if one already owns this chat's mutex (e.g. a spawn race
@@ -18,14 +20,29 @@ if (-not $created) { exit }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
+$script:stMt = [datetime]::MinValue
+$script:stCache = $null
 function Read-State {
-    try { return (Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json) } catch { return $null }
+    # Cached on the file's timestamp: parsing this costs ~3ms and it is read many times a second,
+    # while the reconciler only rewrites it when something about the chat has actually changed.
+    try {
+        $mt = [System.IO.File]::GetLastWriteTimeUtc($StateFile)
+        if ($mt -eq $script:stMt) { return $script:stCache }
+        $o = Read-TextShared $StateFile | ConvertFrom-Json
+        $script:stMt = $mt; $script:stCache = $o
+        return $o
+    } catch { $script:stMt = [datetime]::MinValue; $script:stCache = $null; return $null }
 }
 function NowMsLocal { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $st = Read-State
 $script:R = 0; $script:G = 215; $script:B = 80; $script:Label = ""; $script:Hwnd = [int64]0
 $script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""; $script:Proj = ""
+$script:Showing = $true       # is our chat the tab its window is currently on? (assume yes if unknown)
+$script:baseBmp = $null       # cached chip surface (everything but the state dot)
+$script:Title = ""            # the chat's own title
+$script:Tab   = ""            # the exact label of its editor tab, when the extension has told us
+$script:BranchShow = $true    # does its branch distinguish it from another open chat?
 if ($st) {
     if ($st.color -and $st.color.Count -ge 3) { $script:R=[int]$st.color[0]; $script:G=[int]$st.color[1]; $script:B=[int]$st.color[2] }
     if ($st.label)  { $script:Label  = [string]$st.label }
@@ -34,17 +51,25 @@ if ($st) {
     if ($st.branch) { $script:Branch = [string]$st.branch }
     if ($st.reason) { $script:Reason = [string]$st.reason }
     if ($st.proj)   { $script:Proj   = [string]$st.proj }
+    if ($st.title)  { $script:Title  = [string]$st.title }
+    if ($st.tab)    { $script:Tab    = [string]$st.tab }
+    if ($null -ne $st.branch_show) { $script:BranchShow = [bool]$st.branch_show }
+    if ($null -ne $st.showing) { $script:Showing = [bool]$st.showing }
 }
 
 $GLOW=12; $R_CORNER=5; $PAD_L=12; $PAD_R=12; $BAR_W=6; $DOTSZ=7
 $hFont   = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
-# The chip text: what it's waiting on (when awaiting input), else the topic + its branch.
+# The chip text: what it's waiting on (when awaiting input), else the topic - plus the git branch,
+# but only when the branch actually tells this chat apart from another one you have open (see
+# hal_sessions._branch_shows). The same branch repeated across every tab in a repo is just noise.
 function DisplayText {
     if ($script:State -eq 'waiting' -and $script:Reason) { return $script:Reason }
     $t = $script:Label
-    if ($script:Branch -and $script:Branch -notin @('main','master')) { $t = "$t  $($script:Branch)" }
+    if ($script:Branch -and $script:BranchShow -and $script:Branch -notin @('main','master')) {
+        $t = "$t  $($script:Branch)"
+    }
     return $t
 }
 
@@ -89,7 +114,6 @@ $script:hover = $false
 $script:active = $false       # our chat's window is focused -> keep the tab lit (the tab you're on)
 $script:presentTs = 0         # last time the user was actively present in this chat (from state)
 $script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
-$script:winMiss   = 0         # consecutive window-not-found checks (same idea)
 $script:maybeDrag = $false    # left button is down; still deciding click-vs-drag
 $script:dragging  = $false    # actively dragging this tab to reorder it
 $script:dragStartY = 0
@@ -115,6 +139,56 @@ function RoundedPath($x,$y,$w,$h,$rad){
     $p.AddLine(($x+$w-$rad), ($y+$h), $x, ($y+$h))
     $p.CloseFigure()
     return $p
+}
+
+# Paint a frame: blit the cached chip and draw the live state indicator on top. The indicator is
+# the only thing that changes while a chat works, and rebuilding the whole chip for it was the
+# single most expensive thing the HUD did.
+# Paint a frame: blit the cached chip and draw the live state indicator over it. While a chat works
+# the indicator is the ONLY thing that changes, and rebuilding the whole chip for it - a 12-pass glow,
+# a rounded path per pass - cost 12ms a frame. Blitting the cached surface costs about one.
+$paint = {
+    if ($null -eq $script:baseBmp) { return }
+    $accent = $script:accent
+    $dotX = $script:dotX; $dotY = $script:dotY
+    $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+    $g.DrawImageUnscaled($script:baseBmp, 0, 0)          # verbatim, alpha included
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+    # state indicator: done = check, working = breathing dot, waiting = blinking ring
+    if ($script:State -eq "working") {
+        $pph = (1 + [Math]::Sin($script:phase * 0.28)) / 2
+        $db = New-Object System.Drawing.SolidBrush (CA ([int](95 + 160*$pph)) $accent)
+        $g.FillEllipse($db, $dotX, $dotY, $DOTSZ, $DOTSZ); $db.Dispose()
+    } elseif ($script:State -eq "asking") {
+        # A question mark: this chat is waiting on YOUR answer, which is a different thing from busy
+        # and from blocked-on-a-permission. Pulses so it catches the eye in a stack of quiet tabs.
+        $pph = (1 + [Math]::Sin($script:phase * 0.42)) / 2
+        $qb = New-Object System.Drawing.SolidBrush (CA ([int](150 + 105*$pph)) $accent)
+        $qf = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $g.DrawString("?", $qf, $qb, [float]($dotX - 3), [float]($GLOW + ($script:CH - 17)/2))
+        $qb.Dispose(); $qf.Dispose()
+    } elseif ($script:State -eq "waiting") {
+        $pph = (1 + [Math]::Sin($script:phase * 0.55)) / 2
+        $pen = New-Object System.Drawing.Pen((CA ([int](55 + 200*$pph)) $accent), 2.0)
+        $g.DrawEllipse($pen, $dotX, $dotY, ($DOTSZ-1), ($DOTSZ-1)); $pen.Dispose()
+    } else {
+        $pen = New-Object System.Drawing.Pen($accent, 2.2)
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        $p1 = New-Object System.Drawing.PointF ([float]$dotX,                [float]($dotY + $DOTSZ*0.55))
+        $p2 = New-Object System.Drawing.PointF ([float]($dotX + $DOTSZ*0.4), [float]($dotY + $DOTSZ))
+        $p3 = New-Object System.Drawing.PointF ([float]($dotX + $DOTSZ),     [float]$dotY)
+        $g.DrawLines($pen, @($p1,$p2,$p3)); $pen.Dispose()
+    }
+
+
+    $g.Dispose()
+    [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, $script:winAlpha)
+    Assert-Topmost $form
+    $bmp.Dispose()
 }
 
 $render = {
@@ -160,27 +234,8 @@ $render = {
     $bpen = New-Object System.Drawing.Pen((CA $borderA $accent), $borderW)
     $g.DrawPath($bpen, $cpath); $bpen.Dispose(); $cpath.Dispose()
 
-    # state indicator: done = check, working = breathing dot, waiting = blinking ring
     $dotX = $cx + $BAR_W + 8
     $dotY = $GLOW + [int](($script:CH - $DOTSZ)/2)
-    if ($script:State -eq "working") {
-        $pph = (1 + [Math]::Sin($script:phase * 0.28)) / 2
-        $db = New-Object System.Drawing.SolidBrush (CA ([int](95 + 160*$pph)) $accent)
-        $g.FillEllipse($db, $dotX, $dotY, $DOTSZ, $DOTSZ); $db.Dispose()
-    } elseif ($script:State -eq "waiting") {
-        $pph = (1 + [Math]::Sin($script:phase * 0.55)) / 2
-        $pen = New-Object System.Drawing.Pen((CA ([int](55 + 200*$pph)) $accent), 2.0)
-        $g.DrawEllipse($pen, $dotX, $dotY, ($DOTSZ-1), ($DOTSZ-1)); $pen.Dispose()
-    } else {
-        $pen = New-Object System.Drawing.Pen($accent, 2.2)
-        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
-        $p1 = New-Object System.Drawing.PointF ([float]$dotX,                [float]($dotY + $DOTSZ*0.55))
-        $p2 = New-Object System.Drawing.PointF ([float]($dotX + $DOTSZ*0.4), [float]($dotY + $DOTSZ))
-        $p3 = New-Object System.Drawing.PointF ([float]($dotX + $DOTSZ),     [float]$dotY)
-        $g.DrawLines($pen, @($p1,$p2,$p3)); $pen.Dispose()
-    }
-
     # text in the chat color: awaiting-input reason, else "topic  branch"
     $disp = DisplayText
     if ($disp) {
@@ -207,8 +262,12 @@ $render = {
     }
 
     $g.Dispose()
-    [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $form.Left, $form.Top, $winAlpha)
-    $bmp.Dispose()
+    if ($script:baseBmp) { $script:baseBmp.Dispose() }
+    $script:baseBmp = $bmp            # the chip minus its indicator, reused by $paint
+    $script:accent = $accent; $script:winAlpha = $winAlpha
+    $script:dotX = $cx + $BAR_W + 8
+    $script:dotY = $GLOW + [int](($script:CH - $DOTSZ)/2)
+    & $paint
 }
 
 # Stowed: any click slides it back out. Out: left-click jumps to the chat's window, right-click
@@ -217,16 +276,19 @@ $form.Add_MouseDown({
     param($s, $e)
     if ($script:stowed) {
         $script:stowed = $false                          # open the drawer back up
+        try { $timer.Interval = 30; $script:curInterval = 30 } catch {}
         try { Remove-Item -LiteralPath $script:stowMarker -ErrorAction SilentlyContinue } catch {}
         return
     }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         $script:stowed = $true                           # slide into the drawer (only its edge stays)
+        try { $timer.Interval = 30; $script:curInterval = 30 } catch {}
         try { [System.IO.File]::WriteAllText($script:stowMarker, "1") } catch {}
         return
     }
     # left button: a click jumps to the chat; a drag reorders the tab (decided on release)
     $script:maybeDrag = $true; $script:dragging = $false
+    try { $timer.Interval = 30; $script:curInterval = 30 } catch {}   # respond at full rate now
     $script:dragStartY = [System.Windows.Forms.Cursor]::Position.Y
     $script:grabOffset = [System.Windows.Forms.Cursor]::Position.Y - $form.Top
 })
@@ -256,17 +318,31 @@ $dropReorder = {
         try { [System.IO.File]::WriteAllText($script:ordMarker, [string]$script:ord) } catch {}
     } catch {}
 }
+# Clicking a tab should land you IN the chat, not merely in front of its window - a window can hold
+# several chats and only one is in front. We raise the window ourselves (Win32) and drop a request
+# for the companion VS Code extension, which is inside that window and can switch to the chat's tab
+# and put the cursor in its input. Without the extension installed you still get the window.
+$jumpToChat = {
+    # Ask for the tab by the label the editor actually shows when we know it; the chat title is the
+    # fallback (matched loosely, since VS Code truncates tab labels).
+    $want = if ($script:Tab) { $script:Tab } else { $script:Title }
+    Jump-ToChat $want $script:Hwnd $key
+}
+
 $form.Add_Shown({ [PerPixelLayered]::Init($form.Handle); & $render })
 
 # One timer: ease position every frame (cheap), but only hit the shared registry / state
 # file / lifecycle ~1.6x/sec - a persistent window must not thrash the disk for hours.
 $timer = New-Object System.Windows.Forms.Timer
+$script:lastPoll = 0; $script:lastPulse = 0; $script:lastBeat = 0
+$script:curInterval = 30
 $timer.Interval = 30
 $timer.Add_Tick({
     $script:tick++
-    if (($script:tick % 20) -eq 1) {
-        $now = NowMsLocal
-        try { [System.IO.File]::WriteAllText($AliveFile, "$now") } catch {}   # heartbeat (even while stowed)
+    $nowMs = NowMsLocal
+    if ($nowMs - $script:lastPoll -ge 600) {
+        $script:lastPoll = $nowMs
+        $now = $nowMs
         if (-not (Hud-Enabled)) { $script:closeReq = $true }                  # HUD switched off -> retire
         $st = Read-State
         if ($null -eq $st) {
@@ -280,6 +356,8 @@ $timer.Add_Tick({
                 $nr=[int]$st.color[0]; $ng=[int]$st.color[1]; $nb=[int]$st.color[2]
                 if ($nr -ne $script:R -or $ng -ne $script:G -or $nb -ne $script:B) { $script:R=$nr;$script:G=$ng;$script:B=$nb;$changed=$true }
             }
+            $nbs = ($null -eq $st.branch_show) -or [bool]$st.branch_show
+            if ($nbs -ne $script:BranchShow) { $script:BranchShow = $nbs; Recalc; $changed = $true }
             $nl  = if ($st.label)  { [string]$st.label }  else { "" }
             $nbr = if ($st.branch) { [string]$st.branch } else { "" }
             $nrs = if ($st.reason) { [string]$st.reason } else { "" }
@@ -288,16 +366,19 @@ $timer.Add_Tick({
                 $script:Label = $nl; $script:Branch = $nbr; $script:Reason = $nrs; $script:State = $nstate
                 Recalc; $changed = $true    # any of these can change the chip's displayed text/width
             }
-            if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be recaptured as the user revisits the chat
+            if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be rebound as the user revisits the chat
             if ($st.proj) { $script:Proj = [string]$st.proj }
+            $script:Showing = ($null -eq $st.showing) -or [bool]$st.showing
+            if ($st.title) { $script:Title = [string]$st.title }
+            if ($st.tab)   { $script:Tab   = [string]$st.tab }
             if ($st.present_ts) { $script:presentTs = [int64]$st.present_ts }
-            # Retire only when the window is really gone, and only after a few consecutive misses,
-            # so a transient handle-lookup blip doesn't make the tab flicker out and back.
+            # A dead window handle is NOT a dead chat - VS Code hands out a new handle on reload, and
+            # a chat can outlive the window we happened to bind it to. Closing on that is what used to
+            # make tabs vanish from under open chats. Whether this chat still exists is decided in one
+            # place (hal_sessions, against Claude Code's session registry) and told to us by the state
+            # file disappearing; here we just stop pointing at a handle that's gone.
             if ($script:Hwnd -ne 0 -and -not [PerPixelLayered]::WindowExists([IntPtr]$script:Hwnd)) {
-                $script:winMiss++
-                if ($script:winMiss -ge 3) { $script:closeReq = $true }
-            } else {
-                $script:winMiss = 0
+                $script:Hwnd = 0                              # reconciler rebinds us on its next pass
             }
             if ($changed) { & $render }
         }
@@ -306,16 +387,12 @@ $timer.Add_Tick({
     }
     if ($script:closeReq) { $form.Close(); return }
 
-    # The focused window drives the "tab you're on" highlight and un-hiding a dismissed tab. Match
-    # by handle first, then (handles drift) by the chat's project name in the window title.
+    # "The tab you're on": our chat's window is focused AND that window is showing OUR chat rather
+    # than one of its neighbours (hal_sessions works out which, by window title). Matching on the
+    # project name instead - as this did - lit up every tab in the folder at once, which is exactly
+    # the confusion the HUD exists to remove.
     $fg = ([PerPixelLayered]::GetForegroundWindow()).ToInt64()
-    $isOwn = ($script:Hwnd -ne 0 -and $fg -eq [int64]$script:Hwnd)
-    if (-not $isOwn -and $script:Proj -and $fg -ne 0) {
-        try {
-            $ft = [PerPixelLayered]::WindowTitle([IntPtr]$fg)
-            if ($ft -and $ft.EndsWith("Visual Studio Code") -and $ft.Contains($script:Proj)) { $isOwn = $true }
-        } catch {}
-    }
+    $isOwn = ($script:Hwnd -ne 0 -and $fg -eq [int64]$script:Hwnd -and $script:Showing)
 
     if ($isOwn -ne $script:active) { $script:active = $isOwn; & $render }                 # active-tab highlight
 
@@ -336,7 +413,7 @@ $timer.Add_Tick({
         } else {
             $script:maybeDrag = $false
             if ($script:dragging) { $script:dragging = $false; & $dropReorder }
-            elseif ($script:Hwnd -ne 0) { try { [PerPixelLayered]::FocusWindow([IntPtr]$script:Hwnd) } catch {} }
+            else { & $jumpToChat }
         }
     }
 
@@ -369,10 +446,23 @@ $timer.Add_Tick({
     if ($needRender) { & $render }
 
     # Animate the indicator (~11 fps) while working/awaiting; 'done' stays static.
-    if ((($script:State -eq "working") -or ($script:State -eq "waiting")) -and (($script:tick % 3) -eq 0)) {
+    if (($script:State -in @("working", "waiting", "asking")) -and ($nowMs - $script:lastPulse -ge 90)) {
+        $script:lastPulse = $nowMs
         $script:phase++
-        & $render
+        & $paint                      # cached chip + fresh indicator
     }
+    if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }
+
+    # Adaptive cadence. 30ms while something moves or the cursor is on us, ~11fps while a chat is
+    # working (just the indicator), otherwise a slow idle poll - a tab that is simply sitting there
+    # has nothing to redraw and shouldn't cost anything to keep on screen.
+    $moving = $script:dragging -or $script:maybeDrag -or
+              ([Math]::Abs($script:target - $script:curTop) -ge 0.5) -or
+              ([Math]::Abs($tgtX - $script:chipX) -ge 0.5)
+    $want = if ($moving -or $script:hover) { 30 }
+            elseif ($script:State -in @("working", "waiting", "asking")) { 90 }
+            else { 200 }
+    if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
 })
 $timer.Start()
 

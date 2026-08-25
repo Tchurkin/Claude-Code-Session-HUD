@@ -11,6 +11,7 @@ param(
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'popup_common.ps1')
+if (-not $script:PplReady) { exit 1 }   # no drawing type -> exit so the supervisor respawns a working one
 
 $created = $false
 $script:mutex = New-Object System.Threading.Mutex($true, "hal_window_tint", [ref]$created)
@@ -18,18 +19,35 @@ if (-not $created) { exit }
 
 $badgeDir = Join-Path $env:USERPROFILE ".claude\hal_voice\badges"
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
+$script:stateCache = @{}
 
+# The accent for a window is the colour of the chat that window is CURRENTLY SHOWING. Several chats
+# share a window, so "first state file that names this handle" gave every one of them the same
+# banner - whichever chat happened to sort first. `showing` is worked out by the reconciler from
+# what the window has in front (see hal_sessions._bind_windows); a chat sitting in a background tab
+# is only used as a fallback, for when the window is on something that isn't a chat at all.
 function ColorForHwnd([int64]$hwnd) {
     if ($hwnd -eq 0) { return $null }
+    $fallback = $null
     try {
         foreach ($f in [System.IO.Directory]::GetFiles($badgeDir, "*.json")) {
-            try { $d = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { continue }
+            # Cached per file on its timestamp: this runs ~8x a second and the states rarely change.
+            $d = $null
+            try {
+                $mt = [System.IO.File]::GetLastWriteTimeUtc($f)
+                $c  = $script:stateCache[$f]
+                if ($c -and $c.mt -eq $mt) { $d = $c.d }
+                else { $d = Read-TextShared $f | ConvertFrom-Json
+                       $script:stateCache[$f] = @{ mt = $mt; d = $d } }
+            } catch { continue }
             if ($d -and $d.hwnd -and ([int64]$d.hwnd -eq $hwnd) -and $d.color -and $d.color.Count -ge 3) {
-                return @([int]$d.color[0], [int]$d.color[1], [int]$d.color[2])
+                $col = @([int]$d.color[0], [int]$d.color[1], [int]$d.color[2])
+                if ($null -eq $d.showing -or [bool]$d.showing) { return $col }
+                if (-not $fallback) { $fallback = $col }
             }
         }
     } catch {}
-    return $null
+    return $fallback
 }
 
 $form = New-Object System.Windows.Forms.Form
@@ -38,7 +56,7 @@ $form.StartPosition   = [System.Windows.Forms.FormStartPosition]::Manual
 $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.SetBounds(-32000, -32000, 4, $Thickness)
-$form.Add_Shown({ [PerPixelLayered]::InitClickThrough($form.Handle) })
+$form.Add_Shown({ [PerPixelLayered]::InitClickThrough($form.Handle); Assert-Topmost $form })
 
 $script:cur = ""
 $script:lastSeen = NowMs
@@ -60,6 +78,7 @@ function Draw-Bar($x, $y, $w, $col) {
     }
     $g.Dispose()
     [PerPixelLayered]::SetBitmap($form.Handle, $bmp, $x, $y, 255)
+    Assert-Topmost $form
     $bmp.Dispose()
 }
 
@@ -75,9 +94,10 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 120
 $timer.Add_Tick({
     if (($script:tintTick++ % 8) -eq 0 -and -not (Hud-Enabled)) { $form.Close(); return }   # HUD off -> retire
-    if ($AliveFile) { try { [System.IO.File]::WriteAllText($AliveFile, (NowMs).ToString()) } catch {} }
+    if (($script:tintTick % 8) -eq 3) { Assert-Topmost $form }   # another app can steal the band
     $fg  = [PerPixelLayered]::GetForegroundWindow()
     $col = ColorForHwnd ([int64]$fg)
+    $drew = $false
     if ($col -and -not [PerPixelLayered]::Minimized($fg)) {
         $r = [PerPixelLayered]::Rect($fg)
         if ($r) {
@@ -86,13 +106,16 @@ $timer.Add_Tick({
             if ($bx -lt $scr.Left) { $bw -= ($scr.Left - $bx); $bx = $scr.Left }
             if ($by -lt $scr.Top)  { $by = $scr.Top }
             if (($bx + $bw) -gt $scr.Right) { $bw = $scr.Right - $bx }
-            Draw-Bar $bx $by $bw $col; $script:lastSeen = NowMs; return
+            Draw-Bar $bx $by $bw $col; $script:lastSeen = NowMs; $drew = $true
         }
     }
-    Hide-Bar
-    if ((NowMs) - $script:lastSeen -gt 60000) {
-        try { if (([System.IO.Directory]::GetFiles($badgeDir, "*.json")).Count -eq 0) { $form.Close() } } catch {}
+    if (-not $drew) {
+        Hide-Bar
+        if ((NowMs) - $script:lastSeen -gt 60000) {
+            try { if (([System.IO.Directory]::GetFiles($badgeDir, "*.json")).Count -eq 0) { $form.Close() } } catch {}
+        }
     }
+    Write-Beat $AliveFile        # last: a frame that threw leaves the beat stale, so we get replaced
 })
 $timer.Start()
 

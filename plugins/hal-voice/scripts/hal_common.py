@@ -21,10 +21,11 @@ _DEFAULTS = {
     "enabled":     True,    # master on/off for the whole HUD (flip via the VS Code status-bar extension)
     "badge":       True,    # persistent per-chat color badge window (bottom-right)
     "window_tint": True,    # colored accent bar on the focused chat's VS Code window
-    "button":      True,    # always-on-top button (new chat in a new window)
     "popup":       True,    # our own on-screen "a session needs you" card (Windows)
     "status_card": True,    # top-right per-chat card showing what each chat is working on (Windows)
     "notify":      True,    # native desktop toast (fallback off-Windows / when popup is off)
+    "sound":       True,    # short chime when a chat needs you (asking / blocked / finished)
+    "usage_meter": True,    # show how much of the 5-hour session window is used (needs a login)
     "use_openai":  False,   # opt-in: name tabs with OpenAI. Off = Claude only (API key or CLI)
 }
 
@@ -41,16 +42,45 @@ _SAT       = 0.82         # vivid but not neon, reads well on a dark desktop
 _VAL       = 1.0
 FAIL_COLOR = (240, 80, 70)   # error red (reserved for a future 'failed' badge state)
 
+# The accent is the tab's TEXT, drawn on a near-black chip, so it has to be light enough to read.
+# Hue alone doesn't decide that: at full saturation a blue is barely brighter than the chip it sits
+# on (contrast ~2:1) while a yellow of the same saturation is ~12:1. So every slot is desaturated
+# toward white until it clears a legibility floor - dark hues become pastels, hues that were already
+# bright are untouched, and all of them keep their identity.
+_CHIP_BG      = (44, 44, 44)   # the chip's background when lit (its lightest, so the worst case)
+_MIN_CONTRAST = 4.5            # WCAG AA for normal text
+
+
+def _linear(c):
+    c /= 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(rgb):
+    r, g, b = (_linear(float(x)) for x in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(fg, bg):
+    a, b = relative_luminance(fg), relative_luminance(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
 
 def slot_color(slot):
-    """Vivid, maximally-distinct accent for the session in slot ``slot`` (0, 1, 2, ...)."""
+    """Distinct, legible accent for the session in slot ``slot`` (0, 1, 2, ...)."""
     try:
         slot = int(slot)
     except Exception:
         slot = 0
     hue = ((_HUE_START + slot * _GOLDEN) % 360.0) / 360.0
-    r, g, b = colorsys.hsv_to_rgb(hue, _SAT, _VAL)
-    return (round(r * 255), round(g * 255), round(b * 255))
+    sat = _SAT
+    while True:
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, _VAL)
+        rgb = (round(r * 255), round(g * 255), round(b * 255))
+        if sat <= 0.06 or contrast_ratio(rgb, _CHIP_BG) >= _MIN_CONTRAST:
+            return rgb
+        sat -= 0.02
 
 
 def session_color(session_id):
@@ -69,9 +99,13 @@ def ensure_data_dir():
 
 
 def load_config():
+    # utf-8-sig, not utf-8: this file is shared with PowerShell and the VS Code extension, and a
+    # byte-order mark left by an editor (or by `Set-Content -Encoding utf8`) would otherwise make the
+    # whole config unreadable - which reads as "every setting is at its default" and is a maddening
+    # thing to debug. -sig tolerates a BOM and is identical without one.
     cfg = dict(_DEFAULTS)
     try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
             cfg.update(json.load(f))
     except Exception:
         pass

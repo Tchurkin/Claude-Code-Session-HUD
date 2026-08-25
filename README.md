@@ -25,32 +25,80 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 
 | Feature | What it does |
 |---|---|
-| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's **own stable color** (remembered durably, so the same chat keeps its color across despawn/respawn; it only changes to break a clash with another live chat). It stays put while the chat's window is open (it won't vanish from disuse), the tab for the window you're currently in stays lit, and **focusing a chat's window surfaces its tab** if it wasn't already showing. Sits just above VS Code's status bar so it doesn't cover the bottom-bar buttons. |
-| **Live state** | The badge shows **✓ done**, a **breathing dot = working**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal. |
-| **Smart name** | The badge is labelled with a 1–3 word summary of what the chat is working on (via Claude), and it **re-checks on every prompt** — keeping the name while it still fits and updating it when the chat's focus shifts, so names don't go stale. |
+| **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's **own stable color** (remembered durably, so the same chat keeps its color across despawn/respawn; it only changes to break a clash with another live chat). The tab for the window you're currently in stays lit. Sits just above VS Code's status bar so it doesn't cover the bottom-bar buttons. |
+| **A tab for every open chat** | The tab strip tracks **the chats you actually have open**, not just the ones that happened to fire a hook. Every few seconds the HUD reconciles itself against Claude Code's own registry of live sessions: a chat with no tab gets one (even if it's been sitting idle since you opened it, and even if it's the **second chat in the same window**), a tab whose window was killed comes back, and a tab whose chat has closed goes away. Tabs are never retired for being quiet — only for being **gone**. |
+| **Live state** | The badge shows **✓ done**, a **breathing dot = working**, a **pulsing ? = asking you a question**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal — and a question is called out separately from a permission prompt, because only one of them is waiting on your judgement. |
+| **Audible nudge** | A chat that needs you also **chimes**: a short rising two-tone when it's asking you something or blocked on a permission, a single softer note when a background chat has finished and wants a reply. It's a `winsound` beep from the hook, so it costs no process and Focus Assist can't swallow it. `sound: false` in the config turns it off. |
+| **Branch, when it matters** | A chat's git branch is appended to its tab **only when it tells that chat apart from another one you have open** — one chat per worktree, each on its own branch, which is what the branch is there for. Several chats in the same folder on the same branch don't all get the same suffix; that's clutter, not information. `main`/`master` are never shown. |
+| **Smart name** | Each badge is labelled with the chat's **area of work** in 1–3 words (via Claude) — *College Apps*, *PCB Layout*, *Firmware Engineering* — not the task of the moment, so a tab you learn to recognize stays recognizable. Chats sharing a project folder are told each other's names and get **distinct** ones. It re-checks on every prompt but only renames when the chat has moved to a genuinely different kind of work; if Claude can't be reached it falls back to the project folder, tidied (`claude-code-hud-main` → *Claude Code HUD*). |
+| **Jump to the right chat** | Clicking a badge doesn't just raise a window — it **switches that window to the chat's tab and puts the cursor in its input**. A window holds several chats and only one is in front, so raising it alone lands you in the wrong conversation. A tab also knows *which* window its chat is in: the [companion extension](vscode-extension/) reports what each window is holding, and failing that the chat's own title is matched against what each window is displaying. So chats sharing a folder don't all jump to the same place, and one in a multi-root **Untitled (Workspace)** window (whose title never names the folder) still resolves. Only the chat a window is *currently* showing lights up as "the tab you're on". |
 | **Jump / stow (drawer)** | Left-click a badge to jump to that chat's VS Code window. **Right-click stows it** — the tab slides into a drawer at the right edge, leaving just its colored edge showing; it's never destroyed. **Click the stowed edge (either button) to slide it back out.** **Drag a tab up or down to reorder the stack** — the order sticks. The drawer state and order are remembered across restarts. Hover a badge (or the button) for a hint on what the clicks do. |
-| **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge. |
-| **New-window button** | An always-on-top **+** button; click it to open the current chat's folder in a **new VS Code window** — files right there, so each session is its own window and you can see files across all of them. |
+| **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge — in the colour of the chat that window is **currently showing**, so a window holding several chats re-tints as you switch between them rather than being stuck on whichever one sorted first. |
+| **Readable colors** | Each chat's accent is its tab's *text*, on a near-black chip, so hue alone can't be the whole story: at full saturation a blue sits at ~2:1 contrast against that chip while a yellow is ~13:1. Colors are stepped toward white until they clear WCAG AA (4.5:1), so dark hues arrive as pastels and already-bright ones are left untouched — distinct *and* legible. |
+| **Session usage meter** | A meter above the tab stack showing **how much of your 5-hour session window you have spent** — the real figure from your plan, the same number the usage page in the browser shows, not a local estimate. The session bar is the headline, with **the percentage and how long is left in the window** beside it (`29% / 5h35m`), because that is the limit you actually hit during a day's work; a **thinner, dimmer bar underneath tracks the weekly window**, which is rarely the binding constraint but worth seeing creep up. Green, amber past 60%, red past 85%, and **grey when the reading has gone stale**. Hover for both percentages and when each window rolls over. The countdown ticks down each minute, and disappears when the reading is stale, because a countdown from an old reading is a guess. |
 | **On/off toggle** | Turn the whole HUD off and back on from a **VS Code status-bar button** — a companion extension in [`vscode-extension/`](vscode-extension/) (green = on, dim = off). When off, the badges/tint/button/cards all disappear; flip it back on and they return. (Under the hood it's a `enabled` flag in the config, so you can also toggle it by hand or from your own script.) |
-| **"Working on" cards** | A top-right card per chat, colored to that chat, showing its name and **a short summary of what it's doing** (e.g. *"fixing sim landing crash"*, *"adding servos to schematic"*) — it stays up while the chat works and turns to a brief **done** when it finishes. Hover for a hint; click to jump to that chat. |
-| **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — **left-click to jump** to the chat, **right-click to dismiss**, hover to keep it up. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
+| **"Working on" cards** | A top-right card per chat, colored to that chat, showing its name and **a short summary of what it's doing** (e.g. *"fixing sim landing crash"*, *"adding servos to schematic"*) — it stays up while the chat works and turns to a brief **done** when it finishes. Hover for a hint; clicking it jumps to that chat exactly as its tab does — the right window **and** the right tab inside it. |
+| **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — **left-click to jump** straight into that chat (its window, and its tab within it), **right-click to dismiss**. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
+| **Cards fade, and wait for you** | A card holds — 12s for "what it's doing", 40s for one that needs you — then **fades out slowly over ten seconds** rather than blinking away. **Hovering brings it straight back to full strength and restarts the clock**, even if it was nearly gone. A new card **glides down into place while the ones below slide out of its way** (it claims its slot before it draws, so they're already moving by the time it appears). And there is only ever **one card per chat**: a new one replaces that chat's previous card, whichever kind it is. |
 | **Waiting-for-you alert** | When a background chat **finishes and is waiting on your reply**, a persistent top-right card tells you — so a chat that's done in another window doesn't sit there unnoticed. Click to jump; it clears once you reply. (The chat you're actively looking at just gets a quiet "done".) |
 
-Badges stack, so several chats form a tidy dock; the button rides on top of the stack.
+Badges stack, so several chats form a tidy dock, with the usage meter riding on top of them.
 
 ## How it works
 
-Everything is driven by Claude Code **hooks** → one dispatcher (`scripts/hal_badge.py`):
+What each tab *says* is driven by Claude Code **hooks** → one dispatcher (`scripts/hal_badge.py`):
 
 - `SessionStart` / `UserPromptSubmit` → mark the chat, capture its window, refresh its name
-- `PreToolUse` / `PostToolUse` → keep the badge and helpers alive while it works
+- `PreToolUse` (only `AskUserQuestion` / `ExitPlanMode`) → mark the chat **asking you a question**
 - `Notification` → mark the chat **awaiting input**
 - `Stop` → mark the chat **done**
+- `SessionEnd` → the chat is closing; drop its tab
 
-The dispatcher writes tiny per-chat state files under `~/.claude/hal_voice/`. Three small
-always-on-top helpers render from that state and clean themselves up:
-`badge.ps1` (the badges), `hal_tint.ps1` (the window accent), `claude_button.ps1` (the
-button). Shared Win32/layered-window helpers live in `scripts/popup_common.ps1`.
+Which tabs *exist* is not left to hooks, because a hook only fires when a chat does something —
+a chat you opened and haven't prompted yet, or one that's been idle for an hour, announces
+nothing. Instead `scripts/hal_sessions.py` reconciles the HUD against Claude Code's own registry
+of live sessions (`~/.claude/sessions/<pid>.json`, filtered to PIDs that are genuinely still
+running, newest process per chat). Anything open with no tab is adopted — named instantly from a
+keyword read of its transcript, then upgraded to a Claude-written name in the background — and
+anything closed is retired. It runs as one small daemon per machine (a few polls a minute, exits
+once nothing is open) *and* inline on every hook, so a missing tab heals within seconds even if
+the daemon isn't up. On an older CLI with no session registry, the badge falls back to its
+previous hook-only lifecycle.
+
+Which **window** a tab points at is worked out by evidence rather than guesswork, best source first.
+The companion extension runs inside each window and writes what it's holding — every chat tab, and
+which is in front — to `~/.claude/hal_voice/windows/`; that places even a chat sitting in a
+background tab. Without it, VS Code puts the active tab's name at the front of the window title, so
+a window announces the chat it's showing and the reconciler matches that against the `aiTitle` in
+each chat's transcript. Either beats a folder name (two chats in one repo, or a multi-root workspace
+window that names no folder at all). A binding sticks once made, live evidence overrides a stale
+one, and only where nothing can be told apart does it fall back to matching folder names.
+
+Clicking a badge writes `focus.json`; the extension in whichever window owns that chat brings its
+tab to the front and focuses the input, while the badge raises the window over Win32. A chat that
+`cd`s deep into its own project keeps its identity — hooks report the session's *current* directory,
+and a tab renaming itself after a subfolder is noise.
+
+The dispatcher writes tiny per-chat state files under `~/.claude/hal_voice/`; a tab's state file
+existing *is* the tab. Three small always-on-top helpers render from that state:
+`badge.ps1` (the badges), `hal_tint.ps1` (the window accent), `hal_meter.ps1` (the usage
+meter, which also keeps the reconciler alive). Shared Win32/layered-window helpers live in
+`scripts/popup_common.ps1`.
+
+Handy when something looks off: `python scripts/hal_sessions.py --list` prints every chat the HUD
+believes is open and how many have tabs.
+
+**Cost.** Hooks are the other half of the bill: each one is a process spawn (~300ms), and `PreToolUse` /
+`PostToolUse` used to fire on *every* tool call just to keep the badge alive — a job the reconciler has done
+on its own for a while. They're gone; the only per-tool hook left fires when a chat asks you something.
+
+The overlays are PowerShell processes drawing layered windows, so the HUD is careful about
+what it does per frame. Each one runs at full rate only while something is actually moving, pulsing
+or under the cursor, and drops to a slow idle poll otherwise; state and config files are re-parsed
+only when their timestamps change; the cross-process stacking registry is a line of text rather than
+JSON; a tab that is merely animating blits a cached surface instead of rebuilding its glow; and hooks
+skip a reconcile the daemon has just done. Idle, with six chats open, that is a few percent of one
+core rather than two and a half cores.
 
 On the transition into *awaiting input* the dispatcher raises a notification: on Windows an
 always-on-top card we draw ourselves (`scripts/popup.ps1`, colored to the session, click to
@@ -58,12 +106,19 @@ jump), which can't be suppressed by Focus Assist. Where that's unavailable it fa
 `scripts/hal_notify.py` — a native toast via `osascript` (macOS), `notify-send`/`zenity`
 (Linux), or WinRT (Windows) — best-effort and guarded, so *some* nudge lands on every OS.
 
-Tab names come from **Claude**. With no setup it uses **your existing Claude Code login** —
-the plugin finds the `claude` CLI on your PATH or the copy bundled in the VS Code / Cursor
-extension and asks `claude-haiku` for a 1–3 word name (no API key, runs on your subscription).
-Set `ANTHROPIC_API_KEY` (or drop a key in `~/.claude/.anthropic_key`) to use the API instead —
-faster. If Claude isn't reachable it degrades to a local keyword theme. OpenAI is opt-in only
-(`use_openai` + `OPENAI_API_KEY`).
+Tab names come from **Claude**. With no setup it uses **your existing Claude Code login** — the
+plugin finds a `claude` binary (PATH, or the copy bundled in the VS Code / Cursor extension) and
+asks `claude-haiku` to name the chat's *area of work* in 1–3 words, given the project folder and
+what its neighbouring chats are already called (no API key, runs on your subscription). Set
+`ANTHROPIC_API_KEY` (or drop a key in `~/.claude/.anthropic_key`) to use the API instead — faster.
+If Claude can't be reached the tab falls back to its project folder, tidied, which is already about
+the right label; a newly adopted tab wears that folder name immediately and is renamed in the
+background so nothing waits on the network. OpenAI is opt-in only (`use_openai` + `OPENAI_API_KEY`).
+
+*Windows note:* an npm install puts a `#!/bin/sh` shim named `claude` on PATH next to `claude.cmd`.
+Windows can't execute it, so the plugin asks for real executables by name — a naming call that dies
+on the shim (or on a Greek letter hitting an ANSI pipe) is why tabs used to end up with scraped
+keyword names like *"Will Measure ALL"*.
 
 ## Install
 
@@ -92,6 +147,16 @@ default. So to get the latest:
 Prefer hands-off? Open `/plugin` → **Marketplaces** → select this one → **Enable auto-update**;
 Claude Code will then refresh it at startup and prompt you to reload when there's a new version.
 
+### How the usage meter gets its numbers
+
+Claude Code stores an OAuth token on your machine and its own `/usage` command reads
+`api.anthropic.com/api/oauth/usage`; `scripts/hal_usage.py` asks the same endpoint, once a minute,
+and caches the answer for the overlays to draw. It reads the token fresh each time and never
+refreshes, rewrites, or sends it anywhere else — when the token expires the fetch simply fails, the
+meter greys out, and it recovers on its own once Claude Code renews it in the course of being used.
+That endpoint is not a documented API and could change; if it does, the meter goes grey rather than
+wrong. Set `usage_meter: false` to turn the whole thing off.
+
 ## Config (`~/.claude/hal_voice/config.json`)
 
 | key | meaning |
@@ -99,10 +164,11 @@ Claude Code will then refresh it at startup and prompt you to reload when there'
 | `enabled` | master on/off for the whole HUD; flipped by the VS Code status-bar extension (default true) |
 | `badge` | show the per-chat badges (default true) — *Windows* |
 | `window_tint` | color-accent the focused chat window (default true) — *Windows + VS Code* |
-| `button` | show the new-window button (default true) — *Windows* |
 | `popup` | our own on-screen "a session needs you" card, colored to the session (default true) — *Windows* |
 | `status_card` | top-right per-chat card of what each chat is working on (default true) — *Windows* |
 | `notify` | native desktop toast; fallback when `popup` is off or off-Windows (default true) — *cross-platform* |
+| `sound` | short chime when a chat needs you: asking, blocked, or finished in the background (default true) |
+| `usage_meter` | show how much of the 5-hour session window is used (default true) |
 | `use_openai` | name tabs with OpenAI instead of Claude (default false; needs `OPENAI_API_KEY`) |
 
 ## Limitations & roadmap
