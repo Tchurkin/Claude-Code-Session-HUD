@@ -1,8 +1,8 @@
 {
   "name": "claude-session-hud-statusbar",
   "displayName": "Claude Session HUD — Status Bar Toggle",
-  "description": "A bottom-bar on/off switch for the Claude Session HUD plugin.",
-  "version": "0.1.0",
+  "description": "A bottom-bar on/off switch for the Claude Session HUD plugin, and the liaison that lets a badge open the right chat tab in the right window.",
+  "version": "0.2.0",
   "publisher": "braxtonherold",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other"],
