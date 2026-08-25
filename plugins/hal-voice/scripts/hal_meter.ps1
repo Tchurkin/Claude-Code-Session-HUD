@@ -42,6 +42,9 @@ $script:sessionPct = -1; $script:weeklyPct = -1
 $script:sessionResets = ""; $script:weeklyResets = ""
 $script:sessionLeft = ""   # "2h14m" until the session window rolls over
 $script:stale = $false
+$script:pace = -1.0        # 0 coasting .. 0.5 lands on the limit .. 1 runs out at once (-1 unknown)
+$script:projected = -1     # where the session lands at reset, at the current burn
+$script:hitMins = -1       # minutes until the limit at the current burn
 $script:lastUsage = 0; $script:lastStack = 0; $script:lastPresence = 0
 $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
@@ -132,6 +135,34 @@ function BarColor($pct, $isStale) {
     if ($pct -ge 60) { return [System.Drawing.Color]::FromArgb(255,176,0) }
     return [System.Drawing.Color]::FromArgb(0,205,120)
 }
+
+# The session bar is coloured by where the window is HEADING, not by how full it is - how full it is
+# is what the bar's length already says. hal_usage fits a burn rate to the last twenty minutes of
+# readings and works out whether that rate runs the window out before it resets; this paints that.
+#
+# Blue means the burn does not get you there. Green means you land about on the limit as the window
+# rolls over - spending it exactly, which is fine. Past that you run out early, and the further past,
+# the earlier. The ramp goes through amber rather than straight from green to red because blending
+# those two in RGB passes through a muddy olive; amber is both cleaner and the obvious caution step.
+$script:PaceStops = @(
+    @(0.00,  60, 150, 255),    # blue
+    @(0.50,   0, 205, 120),    # green   (same green the threshold colours use)
+    @(0.75, 255, 176,   0),    # amber
+    @(1.00, 240,  80,  70)     # red
+)
+function PaceColor($p, $isStale) {
+    if ($isStale) { return [System.Drawing.Color]::FromArgb(120,120,126) }
+    if ($p -lt 0) { $p = 0.0 } elseif ($p -gt 1) { $p = 1.0 }
+    $i = 0
+    while (($i -lt ($script:PaceStops.Count - 2)) -and ($p -gt $script:PaceStops[$i+1][0])) { $i++ }
+    $a = $script:PaceStops[$i]; $b = $script:PaceStops[$i+1]
+    $span = $b[0] - $a[0]
+    $f = if ($span -le 0) { 0.0 } else { ($p - $a[0]) / $span }
+    return [System.Drawing.Color]::FromArgb(
+        [int][Math]::Round($a[1] + ($b[1] - $a[1]) * $f),
+        [int][Math]::Round($a[2] + ($b[2] - $a[2]) * $f),
+        [int][Math]::Round($a[3] + ($b[3] - $a[3]) * $f))
+}
 # Compact form for the headline: "43min", "2h14m", "now". The long form goes in the hover hint.
 function ResetShort($iso) {
     if (-not $iso) { return "" }
@@ -142,13 +173,15 @@ function ResetShort($iso) {
         return "{0}h{1:00}m" -f [int]($mins/60), ($mins % 60)
     } catch { return "" }
 }
+function MinsLong($mins) {
+    if ($mins -le 0) { return "any moment" }
+    if ($mins -lt 60) { return "$mins min" }
+    return "{0}h {1}m" -f [int]($mins/60), ($mins % 60)
+}
 function ResetIn($iso) {
     if (-not $iso) { return "" }
     try {
-        $mins = [int]((([datetime]$iso).ToUniversalTime() - [datetime]::UtcNow).TotalMinutes)
-        if ($mins -le 0) { return "any moment" }
-        if ($mins -lt 60) { return "$mins min" }
-        return "{0}h {1}m" -f [int]($mins/60), ($mins % 60)
+        return MinsLong ([int]((([datetime]$iso).ToUniversalTime() - [datetime]::UtcNow).TotalMinutes))
     } catch { return "" }
 }
 
@@ -174,7 +207,10 @@ $render = {
 
         $sw = [int]($UW * $sp / 100.0)
         if ($sw -gt 0) {
-            $sc = BarColor $sp $script:stale
+            # Pace when we have enough readings to fit a rate to; the plain how-full thresholds for
+            # the first few minutes after a cold start, when a made-up rate would be worse than none.
+            $sc = if ($script:pace -ge 0) { PaceColor $script:pace $script:stale }
+                  else { BarColor $sp $script:stale }
             $fb = New-Object System.Drawing.SolidBrush $sc
             $g.FillRectangle($fb, $barL, $sBarY, $sw, $SBAR_H); $fb.Dispose()
         }
@@ -199,6 +235,14 @@ $render = {
         $wIn = ResetIn $script:weeklyResets
         $tip = "session $($script:sessionPct)%"
         if ($sIn) { $tip += " - resets in $sIn" }
+        # The bar's colour is a glance; this is the sentence behind it.
+        if ($script:pace -ge 0) {
+            if ($script:hitMins -ge 0 -and $script:pace -gt 0.5) {
+                $tip += "     limit in ~$(MinsLong $script:hitMins)"
+            } elseif ($script:projected -ge 0) {
+                $tip += "     on pace for $($script:projected)%"
+            }
+        }
         if ($script:weeklyPct -ge 0) {
             $tip += "     weekly $($script:weeklyPct)%"
             if ($wIn) { $tip += " - $wIn" }
@@ -244,18 +288,26 @@ $timer.Add_Tick({
         $script:lastUsage = $nowMs
         $j = Read-JsonFile $usageFile
         $s = -1; $w = -1; $sr = ""; $wr = ""; $st = $false
+        $pc = -1.0; $pj = -1; $hm = -1
         if ($j) {
             if ($null -ne $j.session_pct) { $s = [int]$j.session_pct; $sr = [string]$j.session_resets }
             if ($null -ne $j.weekly_pct)  { $w = [int]$j.weekly_pct;  $wr = [string]$j.weekly_resets }
             try { $st = ($nowMs - [int64]$j.ts) -gt 900000 } catch { $st = $true }
+            # null until there are enough readings to fit a rate to - the meter falls back rather
+            # than inventing a trend from two samples.
+            try { if ($null -ne $j.pace)      { $pc = [double]$j.pace } }     catch { $pc = -1.0 }
+            try { if ($null -ne $j.projected) { $pj = [int]$j.projected } }   catch { $pj = -1 }
+            try { if ($null -ne $j.hit_mins)  { $hm = [int]$j.hit_mins } }    catch { $hm = -1 }
         }
         $left = if ($st) { "" } else { ResetShort $sr }     # a stale reading has no honest countdown
         if ($s -ne $script:sessionPct -or $w -ne $script:weeklyPct -or $st -ne $script:stale -or
             $sr -ne $script:sessionResets -or $wr -ne $script:weeklyResets -or
-            $left -ne $script:sessionLeft) {
+            $left -ne $script:sessionLeft -or $pc -ne $script:pace -or
+            $pj -ne $script:projected -or $hm -ne $script:hitMins) {
             $script:sessionPct = $s; $script:weeklyPct = $w; $script:stale = $st
             $script:sessionResets = $sr; $script:weeklyResets = $wr
             $script:sessionLeft = $left
+            $script:pace = $pc; $script:projected = $pj; $script:hitMins = $hm
             & $render
         }
     }

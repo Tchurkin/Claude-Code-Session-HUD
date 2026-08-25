@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Subscription usage - the real numbers, not an estimate.
+Subscription usage - the real numbers, not an estimate, plus which way they are heading.
 
 How much of your session you've spent is the one thing the HUD couldn't work out locally. Transcripts
 record every token, but a plan's limits are weighted per model and live server-side, so a local tally
 can tell you what you burned and never what you have left. Claude Code's own ``/usage`` gets the real
 figures from ``/api/oauth/usage``; this asks the same endpoint, with the OAuth token Claude Code has
 already stored on this machine.
+
+A percentage on its own is only half the story: 60% spent is comfortable four hours into a window and
+alarming twenty minutes in. So this also keeps a short history of readings and fits a burn rate to
+them, which turns the bare number into the question you actually care about - at this rate, do I run
+out before the window resets? That answer is published as ``pace`` and the meter paints it.
 
 Deliberately hands-off about credentials: it reads the token fresh each time and never refreshes,
 rewrites or transmits it anywhere but api.anthropic.com. When the token has expired the fetch simply
@@ -22,6 +27,16 @@ CREDENTIALS = os.path.join(CLAUDE_DIR, ".credentials.json")
 CACHE       = os.path.join(hc.DATA_DIR, "usage.json")
 ENDPOINT    = "https://api.anthropic.com/api/oauth/usage"
 POLL_MS     = 60000          # the numbers move slowly; one request a minute is plenty
+FAIL_MAX_MS = 600000         # ... and when one fails, back off rather than hammering
+
+# Fitting the burn rate. Twenty minutes is long enough to ride out the coarseness of a percentage
+# that only moves in whole points, and short enough that putting the laptop down shows up in the
+# colour within the same window - samples simply age out of it, so the rate decays on its own.
+RATE_WINDOW_MS = 20 * 60 * 1000
+MIN_SAMPLES    = 4
+MIN_SPAN_MS    = 5 * 60 * 1000
+MAX_SAMPLES    = 240         # backstop; the window trim is what normally bounds this
+WINDOW_DROP    = 3.0         # a fall this size means a new window, not a rounding wobble
 
 
 def _token():
@@ -32,12 +47,18 @@ def _token():
         return None
 
 
-def _pct(block):
+def _util(block):
+    """Utilization as a float, keeping whatever resolution the API gave us - the rate fit wants it."""
     try:
         v = block.get("utilization")
-        return None if v is None else max(0, min(100, int(round(float(v)))))
+        return None if v is None else max(0.0, min(100.0, float(v)))
     except Exception:
         return None
+
+
+def _pct(block):
+    u = _util(block)
+    return None if u is None else int(round(u))
 
 
 def fetch(timeout=10):
@@ -64,45 +85,180 @@ def fetch(timeout=10):
         if lim.get("kind") == "session" and lim.get("severity"):
             sev = str(lim["severity"])
     return {"ts": int(time.time() * 1000),
-            "session_pct": _pct(five), "session_resets": five.get("resets_at"),
+            "session_pct": _pct(five), "session_util": _util(five),
+            "session_resets": five.get("resets_at"),
             "weekly_pct": _pct(week),  "weekly_resets": week.get("resets_at"),
             "severity": sev}
 
 
+# -- which way it's heading -------------------------------------------------------------------
+def mins_until(iso):
+    """Minutes until an ISO timestamp, or None if it isn't one. Never negative."""
+    if not iso:
+        return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return max(0.0, (t - datetime.now(timezone.utc)).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def _keep(hist, sample, resets, prev_resets):
+    """The samples that still describe the window we are in now.
+
+    History is only meaningful within one window: when the window rolls over, utilization drops back
+    to near zero and a rate fitted across the seam would read as a huge negative burn. So the history
+    is dropped whenever the reset time moves on, and - belt and braces, since the API could round the
+    reset time or omit it - whenever the reading itself falls by more than a rounding wobble."""
+    ts, util = sample
+    hist = [h for h in hist if isinstance(h, (list, tuple)) and len(h) == 2]
+    if resets and prev_resets and resets != prev_resets:
+        hist = []
+    elif hist and util < hist[-1][1] - WINDOW_DROP:
+        hist = []
+    hist = [list(h) for h in hist if h[0] < ts]        # ignore anything at or ahead of now
+    hist.append([ts, util])
+    hist = [h for h in hist if ts - h[0] <= RATE_WINDOW_MS]
+    return hist[-MAX_SAMPLES:]
+
+
+def burn_rate(hist):
+    """Utilization points per minute, by least squares over the history. None if it can't be said.
+
+    Least squares rather than first-minus-last because the reading moves in coarse steps: across
+    twenty one-point samples a difference of endpoints is mostly quantization, while the fitted slope
+    uses every sample and settles down. Clamped at zero - the reading only climbs within a window, so
+    a negative slope is noise, not a refund."""
+    pts = [(h[0] / 60000.0, float(h[1])) for h in hist
+           if isinstance(h, (list, tuple)) and len(h) == 2]
+    if len(pts) < MIN_SAMPLES:
+        return None
+    if (pts[-1][0] - pts[0][0]) * 60000.0 < MIN_SPAN_MS:
+        return None
+    n = float(len(pts))
+    mt = sum(t for t, _ in pts) / n
+    mu = sum(u for _, u in pts) / n
+    den = sum((t - mt) ** 2 for t, _ in pts)
+    if den <= 0:
+        return None
+    return max(0.0, sum((t - mt) * (u - mu) for t, u in pts) / den)
+
+
+def pace(util, rate, mins_left):
+    """Where this window is heading, as 0..1: 0 = coasting, 0.5 = lands exactly on the limit, 1 = out.
+
+    Two halves that meet at the same point. Under the limit, the scale is simply how full the window
+    will be when it resets, so idling at 30% reads low and idling at 90% does not - the colour can
+    never call a nearly-spent window relaxed. Over the limit, the scale becomes how EARLY you run
+    out: hitting it just as the window closes is that same 0.5, hitting it immediately is 1. Both
+    branches agree at projected == 100, so the colour moves smoothly through the crossover."""
+    if util is None:
+        return None
+    util = max(0.0, min(100.0, float(util)))
+    if util >= 100.0:
+        return 1.0
+    if rate is None or mins_left is None:
+        return None
+    rate = max(0.0, float(rate))
+    mins_left = max(0.0, float(mins_left))
+    projected = util + rate * mins_left
+    if projected <= 100.0 or rate <= 0 or mins_left <= 0:
+        return max(0.0, min(0.5, 0.5 * min(projected, 100.0) / 100.0))
+    hit = (100.0 - util) / rate                        # minutes to the limit; less than mins_left
+    return max(0.5, min(1.0, 0.5 + 0.5 * (1.0 - hit / mins_left)))
+
+
+def project(cur):
+    """Work out burn / projected / pace / hit_mins for a reading, in place. Returns it."""
+    util = cur.get("session_util")
+    if util is None and cur.get("session_pct") is not None:
+        util = float(cur["session_pct"])
+    left = mins_until(cur.get("session_resets"))
+    rate = burn_rate(cur.get("history") or [])
+    cur["burn"] = None if rate is None else round(rate, 4)
+    cur["pace"] = cur["projected"] = cur["hit_mins"] = None
+    if util is None:
+        return cur
+    p = pace(util, rate, left)
+    cur["pace"] = None if p is None else round(p, 4)
+    if rate is not None and left is not None:
+        cur["projected"] = round(min(999.0, util + rate * left), 1)
+        if util >= 100.0:
+            cur["hit_mins"] = 0
+        elif rate > 0:
+            cur["hit_mins"] = int(round((100.0 - util) / rate))
+    return cur
+
+
+# -- cache ------------------------------------------------------------------------------------
 def read():
     try:
-        with open(CACHE, encoding="utf-8") as f:
-            return json.load(f)
+        with open(CACHE, encoding="utf-8-sig") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+def _publish(d):
+    try:
+        os.makedirs(hc.DATA_DIR, exist_ok=True)
+        tmp = CACHE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, CACHE)
+    except Exception:
+        pass
+
+
+def _num(d, key):
+    try:
+        return float(d.get(key) or 0)
+    except Exception:
+        return 0.0
 
 
 def refresh(force=False):
     """Fetch at most once a minute and publish for the overlays to draw. Returns the current values."""
     cur = read()
-    try:
-        fresh = (time.time() * 1000 - float(cur.get("ts") or 0)) < POLL_MS
-    except Exception:
-        fresh = False
-    if fresh and not force:
-        return cur
+    now = time.time() * 1000
+    if not force:
+        if now - _num(cur, "ts") < POLL_MS:
+            return cur
+        if now < _num(cur, "next_try"):
+            return cur                                 # a recent fetch failed; let the backoff run
     got = fetch()
     if not got:
-        return cur                                        # keep showing the last good numbers
-    try:
-        os.makedirs(hc.DATA_DIR, exist_ok=True)
-        tmp = CACHE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(got, f)
-        os.replace(tmp, CACHE)
-    except Exception:
-        pass
+        # Don't retry on every daemon tick - the daemon comes round every few seconds, and a failing
+        # endpoint (an expired token, a 429) would otherwise get hit that often. `ts` is deliberately
+        # left alone so the meter can still tell the reading has gone stale; the backoff has its own
+        # field, and doubles up to FAIL_MAX_MS.
+        n = int(_num(cur, "fail_n")) + 1
+        cur["fail_n"] = n
+        cur["next_try"] = now + min(FAIL_MAX_MS, POLL_MS * (2 ** min(n - 1, 6)))
+        _publish(cur)
+        return cur                                     # keep showing the last good numbers
+    util = got.get("session_util")
+    if util is None and got.get("session_pct") is not None:
+        util = float(got["session_pct"])
+    prior = list(cur.get("history") or [])
+    got["history"] = (_keep(prior, [got["ts"], util], got.get("session_resets"),
+                            cur.get("session_resets"))
+                      if util is not None else prior)
+    project(got)
+    _publish(got)
     return got
 
 
 if __name__ == "__main__":
     import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    u = refresh(force=True)
+    offline = "--no-fetch" in sys.argv                  # inspect the cache without spending a request
+    u = project(read()) if offline else refresh(force=True)
     print("session %s%%  (resets %s)" % (u.get("session_pct"), u.get("session_resets")))
     print("weekly  %s%%  (resets %s)" % (u.get("weekly_pct"), u.get("weekly_resets")))
+    print("history %d samples   burn %s %%/min   projected %s%%   pace %s   limit in %s min"
+          % (len(u.get("history") or []), u.get("burn"), u.get("projected"),
+             u.get("pace"), u.get("hit_mins")))
