@@ -167,6 +167,36 @@ check(not re.search(r"\$G(?![A-Za-z0-9_])", code),
       "and nothing else called $G, which would silently be the same variable")
 print("naming: no constant collides with $g")
 
+# -- 7. both hit boxes -------------------------------------------------------------------------------
+# Two separate lessons about layered windows, learned the same way: what you can click is the alpha
+# you drew, not the shape you meant.
+#
+# The handle runs off the right of its own canvas so the screen clips it. That leaves no visible
+# right edge AND makes the last column of pixels on the screen part of the button - which is the
+# only reason you can throw the pointer at the corner without aiming.
+check(re.search(r"\$right = \$HG \+ \$W \+ \$HG", DOCK),
+      "the handle's pill extends past its canvas, so it reaches the screen edge")
+check(re.search(r"AddLine\(\$right, \$HG, \$right, \(\$HG \+ \$H\)\)", DOCK),
+      "and the path actually uses that edge")
+check(not re.search(r"InStrip[\s\S]{0,400}?\$cp\.X -lt", DOCK),
+      "InStrip has no right-hand bound, or the very edge would be a dead column")
+
+# The meter's readout is the button, not just the 62px of bar - the percentage and the countdown
+# above it are the bigger target and were previously outside it entirely.
+check("$script:hitL" in METER and "$script:hitR" in METER, "the meter records what it drew")
+check(re.search(r"\$left = \$barR - \[Math\]::Max\(\$UW, \$hw\)", METER),
+      "the box spans the bar OR the headline, whichever is wider")
+check(re.search(r"\$x0 = \$form\.Left \+ \$script:hitL; \$x1 = \$form\.Left \+ \$script:hitR", METER),
+      "and the hit test reads it back rather than re-deriving a stale box")
+check(not re.search(r"\$cp\.X -lt \(\$mx \+ \$UW\)", METER),
+      "the old bar-only box is gone")
+check(re.search(r"FromArgb\(3, 0, 0, 0\)", METER),
+      "an all-but-invisible backing rect makes the gaps between glyphs clickable too - without it "
+      "the text looks like a button and behaves like a colander")
+check(re.search(r"FillRectangle\(\$hit, \$script:hitL", METER), "and it covers exactly the hit box")
+print("hit boxes: handle runs to the screen edge, meter covers its whole readout")
+
+
 import shutil                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - the dock leaves and returns as one object, and the handle can be hit")

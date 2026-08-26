@@ -31,7 +31,7 @@ $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 # Not $G: PowerShell variable names are case-insensitive, so a constant called $G and the
 # Graphics object called $g are the same variable, and the second one to be assigned wins.
 $HG = 8                     # glow margin around the strip
-$W = 14; $H = 48            # the strip itself, in the 30px lane the dock leaves for it
+$W = 18; $H = 48            # the visible strip, filling the 30px lane the dock leaves for it
 $FORM_W = $W + $HG*2; $FORM_H = $H + $HG*2
 
 $script:closeReq = $false
@@ -58,9 +58,11 @@ $form.Top  = [int]($screen.Bottom - 44 - $H - $HG)    # bottom of the dock, abov
 $script:flip = Dock-Phase
 
 function InStrip {
+    # No right-hand bound: the strip runs to the screen edge and the cursor cannot go further, so
+    # capping it would only create a dead column at the very edge - exactly where you aim.
     $cp = [System.Windows.Forms.Cursor]::Position
     $x = $form.Left + $HG; $y = $form.Top + $HG
-    return ($cp.X -ge $x -and $cp.X -lt ($x + $W) -and $cp.Y -ge $y -and $cp.Y -lt ($y + $H))
+    return ($cp.X -ge $x -and $cp.Y -ge $y -and $cp.Y -lt ($y + $H))
 }
 
 $render = {
@@ -74,8 +76,13 @@ $render = {
     $a = if ($script:hot) { 235 } else { 170 }
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
     $r = 6
+    # Runs past the right of the canvas on purpose. The screen clips it, so there is no visible right
+    # edge - it reads as attached to the edge rather than parked near it - and, because a layered
+    # window is hit-tested on alpha, the very last column of pixels on the screen is still the button.
+    # You can throw the pointer at the edge without aiming, which is the whole point of putting it there.
+    $right = $HG + $W + $HG
     $path.AddArc($HG, $HG, $r*2, $r*2, 180, 90)
-    $path.AddLine(($HG + $W), $HG, ($HG + $W), ($HG + $H))
+    $path.AddLine($right, $HG, $right, ($HG + $H))
     $path.AddArc($HG, ($HG + $H - $r*2), $r*2, $r*2, 90, 90)
     $path.CloseFigure()
     $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($a, 26, 26, 28))

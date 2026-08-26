@@ -65,6 +65,8 @@ $script:lastSlide = -1.0
 $script:lastUsage = 0; $script:lastStack = 0; $script:lastPresence = 0
 $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
 $script:lastFrame = 0
+# What the readout currently occupies, in canvas coords - set by the render, read by Over-Bar.
+$script:hitL = 0; $script:hitR = 0
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -126,11 +128,15 @@ function StackHeight {
 # too - so the daemon is watched by everything on screen rather than by one process that the daemon
 # was in turn the only watcher of.
 
+# The whole readout is the button - the bars AND the text above them, not just the 62px of bar.
+# The render works out how far left the text actually reached and records it here, so the target is
+# whatever is on screen rather than a guess that goes stale when the countdown gets longer.
 function Over-Bar {
     if ($script:slide -gt 2) { return $false }      # slid away: the handle is the only control now
     $cp = [System.Windows.Forms.Cursor]::Position
-    $mx = $form.Left + $GLOW + $OX; $my = $script:lastTop + $GLOW
-    return ($cp.X -ge $mx -and $cp.X -lt ($mx + $UW) -and $cp.Y -ge $my -and $cp.Y -lt ($my + $CONTENT_H))
+    $x0 = $form.Left + $script:hitL; $x1 = $form.Left + $script:hitR
+    $y0 = $script:lastTop + $GLOW - 3               # a few px of slack: this is a target, not a seal
+    return ($cp.X -ge $x0 -and $cp.X -lt $x1 -and $cp.Y -ge $y0 -and $cp.Y -lt ($y0 + $CONTENT_H + 6))
 }
 
 function RoundedPath($x, $y, $w, $h, $rad) {
@@ -310,12 +316,27 @@ $render = {
         # "7% / 2h14m" - how much of the window is gone AND how long until it rolls over. The
         # percentage on its own tells you where you stand but not how long you have to spend it.
         $head = if ($script:sessionLeft) { "$sp% / $($script:sessionLeft)" } else { "$sp%" }
+        $hw = [int][Math]::Ceiling($g.MeasureString($head, $uFont).Width)
+        $left = $barR - [Math]::Max($UW, $hw)
+        $pk = ""
+        if ($script:parked -gt 0) {
+            $pk = "+$($script:parked)"
+            $left = [Math]::Min($left, ($barR - $hw - 8 - [int][Math]::Ceiling($g.MeasureString($pk, $uFont).Width)))
+        }
+        $script:hitL = $left - 4; $script:hitR = $barR + 4
+
+        # A layered window is hit-tested on alpha, so the gaps BETWEEN glyphs are holes a click falls
+        # straight through - the text would look like a button and behave like a colander. An alpha
+        # of 3 over the whole readout is invisible on any display and makes every pixel of it live.
+        $hit = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(3, 0, 0, 0))
+        $g.FillRectangle($hit, $script:hitL, ($GLOW - 3), ($script:hitR - $script:hitL), ($CONTENT_H + 6))
+        $hit.Dispose()
+
         Draw-OutlinedText $g $head $uFont $ptc $barR ($GLOW + 1) 3 'right'
         # Tabs pushed off the top of the dock. Sits to the left of the reading, dimmer, so the stack
         # never just loses tabs silently - they are parked, not gone, and they come back.
-        if ($script:parked -gt 0) {
-            $hw = [int][Math]::Ceiling($g.MeasureString($head, $uFont).Width)
-            Draw-OutlinedText $g "+$($script:parked)" $uFont ([System.Drawing.Color]::FromArgb(188,188,196)) `
+        if ($pk) {
+            Draw-OutlinedText $g $pk $uFont ([System.Drawing.Color]::FromArgb(188,188,196)) `
                               ($barR - $hw - 8) ($GLOW + 1) 3 'right'
         }
     }
