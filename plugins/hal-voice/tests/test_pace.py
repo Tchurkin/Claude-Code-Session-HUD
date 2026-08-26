@@ -422,6 +422,60 @@ for k, v in got.items():
     check(not m or int(m.group(1)) < 24, "%s minutes rendered as %r, which is 24h or more" % (k, v))
 print("durations: %s, %s, %s - nothing over 23h" % (got["90"], got["1440"], got["9000"]))
 
+# -- 9. the sparkline's scaling ------------------------------------------------------------------
+# The chart spans the samples' own range, which is the only way twenty quiet minutes are visible at
+# all - but auto-scaling a signal that only moves in whole points would turn one rounding tick into
+# a cliff. SparkNorm comes out of hal_meter.ps1 and gets run, same as the ramp above.
+_ps = [
+    "function Show($label, $vals, $span) {",
+    "  $r = SparkNorm $vals $span",
+    "  Write-Output ('{0}|{1}' -f $label, (($r | ForEach-Object { '{0:F3}' -f $_ }) -join ','))",
+    "}",
+    "Show 'rising' @(10.0,11.0,12.0,13.0) 2.5",
+    "Show 'flat'   @(42.0,42.0,42.0,42.0) 2.5",
+    "Show 'tick'   @(38.0,38.0,39.0,39.0) 2.5",
+    "Show 'wide'   @(10.0,20.0,30.0,40.0) 2.5",
+    "Show 'single' @(7.0) 2.5",
+    "Show 'dip'    @(50.0,60.0,55.0,70.0) 2.5",
+]
+probe3 = os.path.join(tmp, "spark.ps1")
+with open(probe3, "w", encoding="utf-8") as f:
+    f.write(_ps_function("SparkNorm") + "\n" + "\n".join(_ps) + "\n")
+r3 = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-File", probe3],
+                    capture_output=True, text=True)
+check(r3.returncode == 0, "SparkNorm runs under PowerShell: %s" % (r3.stderr or "")[:400])
+sn = {}
+for line in r3.stdout.strip().splitlines():
+    if "|" in line:
+        k, v = line.split("|", 1)
+        sn[k] = [float(x) for x in v.split(",") if x.strip()]
+check(len(sn) == 6, "a series came back for each case (got %r)" % sorted(sn))
+
+check(abs(sn["rising"][0]) < 1e-9 and abs(sn["rising"][-1] - 1.0) < 1e-9,
+      "a rising run spans the full height (got %r)" % sn["rising"])
+check(sn["rising"] == sorted(sn["rising"]), "and stays monotonic (got %r)" % sn["rising"])
+
+# The one that matters: an unchanging window draws down the MIDDLE. Along the bottom is what 0..100
+# scaling would give, and it reads as "you have used nothing" when you may have used almost all.
+check(all(abs(v - 0.5) < 1e-9 for v in sn["flat"]),
+      "an unchanging window is a flat line through the centre (got %r)" % sn["flat"])
+check(len(sn["flat"]) == 4, "and keeps every sample (got %d)" % len(sn["flat"]))
+
+# A single whole-point tick has to stay a modest step; unfloored auto-scaling makes it full height.
+rise = max(sn["tick"]) - min(sn["tick"])
+check(0.2 < rise < 0.55,
+      "a lone 38->39 tick is a step, not a cliff (spans %.2f of the height)" % rise)
+
+# Past the floor, real ranges scale end to end as normal.
+check(abs(sn["wide"][0]) < 1e-9 and abs(sn["wide"][-1] - 1.0) < 1e-9,
+      "a 30-point range uses the full height (got %r)" % sn["wide"])
+check(abs(sn["dip"][1] - sn["dip"][2]) > 0.1, "and a dip in the middle stays visible")
+check(all(0.0 <= v <= 1.0 for k in sn for v in sn[k]), "nothing ever escapes 0..1")
+check(sn["single"] == [0.5], "a lone sample sits mid-height rather than dividing by zero")
+print("sparkline: flat sits at %.2f, one tick spans %.2f, a wide range uses the full 0..1"
+      % (sn["flat"][0], rise))
+
+
 import shutil                                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - pace maths, backoff and the shipped colour ramp all hold")

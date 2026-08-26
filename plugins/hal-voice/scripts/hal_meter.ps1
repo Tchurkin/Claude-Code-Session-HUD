@@ -24,7 +24,7 @@ if (-not $created) { exit }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $GLOW = 10
-$TIP_W = 520                                       # room to the LEFT for the hover hint
+$TIP_W = 600                                       # room to the LEFT for the hover hint
 $OX = $TIP_W
 $UW = 62                                           # bar width
 $UPCT_H = 15                                       # room for the percentage text
@@ -37,11 +37,20 @@ $FORM_H = $CONTENT_H + $GLOW*2
 $uFont   = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
+# The sparkline in the hover hint: the last twenty minutes of readings, which hal_usage already keeps
+# for the burn-rate fit and would otherwise throw away. No axes, no gridlines, no track - just the
+# shape, so "on pace for 46%" comes with the thing it was worked out from.
+$SPARK_W = 60; $SPARK_H = 14; $SPARK_GAP = 8
+$SPARK_MIN = 4          # deliberately hal_usage.MIN_SAMPLES: the chart appears with the pace clause
+$SPARK_MIN_SPAN = 2.5   # utilization points; never zoom in past this (see SparkNorm)
+
 $script:hot = $false; $script:closeReq = $false
 $script:sessionPct = -1; $script:weeklyPct = -1
 $script:sessionResets = ""; $script:weeklyResets = ""
 $script:sessionLeft = ""   # "2h14m" until the session window rolls over
 $script:stale = $false
+$script:hist = @()         # recent [ms, utilization] readings, for the sparkline
+$script:histSig = ""       # cheap "has the history changed" key
 $script:pace = -1.0        # 0 coasting .. 0.5 lands on the limit .. 1 runs out at once (-1 unknown)
 $script:projected = -1     # where the session lands at reset, at the current burn
 $script:hitMins = -1       # minutes until the limit at the current burn
@@ -163,6 +172,69 @@ function PaceColor($p, $isStale) {
         [int][Math]::Round($a[2] + ($b[2] - $a[2]) * $f),
         [int][Math]::Round($a[3] + ($b[3] - $a[3]) * $f))
 }
+
+# Normalise utilization samples to 0..1 for the sparkline.
+#
+# Spans the samples' own min..max rather than 0..100, because a quiet twenty minutes covers about two
+# points and against a full scale would be an invisible straight line pinned to the bottom. But it
+# never zooms in past $minSpan: the reading only moves in whole points, so an unfloored auto-scale
+# turns a single 38->39 tick into a full-height cliff and the chart screams about a rounding step.
+#
+# The floor is centred on the data's midpoint, which also disposes of the all-equal case for free -
+# the span collapses below $minSpan, the window recentres, every sample comes back 0.5, and a flat
+# twenty minutes draws as a flat line down the MIDDLE. Not along the bottom, which is what 0..100
+# scaling would give and which reads as "you have used nothing".
+#
+# `,$out` so PowerShell returns the array whole instead of unrolling it into the pipeline - a
+# one-element result would otherwise come back as a bare double.
+function SparkNorm($us, $minSpan) {
+    $n = @($us).Count
+    if ($n -lt 1) { return ,@() }
+    $lo = [double]$us[0]; $hi = $lo
+    foreach ($u in $us) { $v = [double]$u; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
+    if (($hi - $lo) -lt $minSpan) {
+        $mid = ($hi + $lo) / 2.0
+        $lo = $mid - $minSpan / 2.0; $hi = $mid + $minSpan / 2.0
+    }
+    $span = $hi - $lo
+    $out = New-Object 'double[]' $n
+    for ($i = 0; $i -lt $n; $i++) {
+        $f = ([double]$us[$i] - $lo) / $span
+        if ($f -lt 0) { $f = 0.0 } elseif ($f -gt 1) { $f = 1.0 }
+        $out[$i] = $f
+    }
+    return ,$out
+}
+
+function Draw-Spark($g, $hist, $x, $y) {
+    $n = @($hist).Count
+    if ($n -lt 2) { return }                 # DrawLines throws on a single point
+    try {
+        $ts = New-Object 'double[]' $n; $us = New-Object 'double[]' $n
+        for ($i = 0; $i -lt $n; $i++) { $ts[$i] = [double]$hist[$i][0]; $us[$i] = [double]$hist[$i][1] }
+        $f = SparkNorm $us $SPARK_MIN_SPAN
+        $t0 = $ts[0]; $dt = $ts[$n - 1] - $t0
+        $pts = New-Object 'System.Drawing.PointF[]' $n
+        for ($i = 0; $i -lt $n; $i++) {
+            # x by timestamp, not index. The poll cadence is adaptive, so a four-minute gap and a
+            # forty-five-second one are not the same amount of time and must not draw the same width.
+            $fx = if ($dt -le 0) { $i / [double]($n - 1) } else { ($ts[$i] - $t0) / $dt }
+            $pts[$i] = [System.Drawing.PointF]::new(
+                [single]($x + $fx * ($SPARK_W - 1)),
+                [single]($y + ($SPARK_H - 1) - $f[$i] * ($SPARK_H - 1)))   # inverted: more is higher
+        }
+        $col = if ($script:pace -ge 0) { PaceColor $script:pace $script:stale }
+               else { BarColor $script:sessionPct $script:stale }
+        $pen = New-Object System.Drawing.Pen $col, 1.4
+        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        $g.DrawLines($pen, $pts); $pen.Dispose()
+        $dot = New-Object System.Drawing.SolidBrush $col      # mark "now", legible at 60x14
+        $g.FillEllipse($dot, [single]($pts[$n - 1].X - 2.0), [single]($pts[$n - 1].Y - 2.0), 4.0, 4.0)
+        $dot.Dispose()
+    } catch { }        # a torn read must never take the whole paint loop down with it
+}
 # Compact form for the headline: "43min", "2h14m", "now". The long form goes in the hover hint.
 function ResetShort($iso) {
     if (-not $iso) { return "" }
@@ -264,24 +336,58 @@ $render = {
             $parts += $wk
         }
         $room = $GLOW + $OX - 12                       # all the space left of the bar, less a margin
-        $tip = $parts -join "     "
-        $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
-        while ($parts.Count -gt 1 -and ($tw + 18) -gt $room) {
-            $parts = @($parts[0..($parts.Count - 2)])
+        # The chart shows up exactly when the pace clause does - same sample threshold - so the
+        # picture and the sentence worked out from it arrive and leave together.
+        $chart = $null
+        if ($script:pace -ge 0 -and @($script:hist).Count -ge $SPARK_MIN) { $chart = @($script:hist) }
+
+        if ($null -eq $chart) {
             $tip = $parts -join "     "
             $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
+            while ($parts.Count -gt 1 -and ($tw + 18) -gt $room) {
+                $parts = @($parts[0..($parts.Count - 2)])
+                $tip = $parts -join "     "
+                $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
+            }
+            $tbw = $tw + 18
+        } else {
+            # [9][ lead ][gap][ chart ][gap][ rest ][9] - the chart sits between "session 39%..." and
+            # "on pace for 46%", next to the number it explains. Measured segment by segment rather
+            # than as one string: GDI+ trims trailing whitespace, so the joined width of a run that
+            # ends in a separator is not the width of its parts.
+            $lead0 = $parts[0]
+            $wL = [int][Math]::Ceiling($g.MeasureString($lead0, $tipFont).Width)
+            while ($true) {
+                $rest = if ($parts.Count -gt 1) { $parts[1..($parts.Count - 1)] -join "     " } else { "" }
+                $wR = if ($rest) { [int][Math]::Ceiling($g.MeasureString($rest, $tipFont).Width) } else { 0 }
+                $chartW = $SPARK_GAP + $SPARK_W + $(if ($rest) { $SPARK_GAP } else { 0 })
+                $tbw = 18 + $wL + $chartW + $wR
+                if ($parts.Count -le 1 -or $tbw -le $room) { break }
+                $parts = @($parts[0..($parts.Count - 2)])
+            }
         }
-        $tbw = $tw + 18; $tbh = [int]$tipFont.Height + 8
+        $tbh = [Math]::Max(([int]$tipFont.Height + 8), ($SPARK_H + 10))
         $tbx = $GLOW + $OX - 10 - $tbw
         if ($tbx -lt 2) { $tbx = 2 }
-        $tby = $GLOW + [int](($CONTENT_H - $tbh)/2)
+        $tby = $GLOW + [int][Math]::Floor(($CONTENT_H - $tbh)/2)
         $tp = RoundedPath $tbx $tby $tbw $tbh 5
         $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246, 26, 26, 28))
         $g.FillPath($tbg, $tp); $tbg.Dispose()
         $tpen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120, 200, 200, 210)), 1
         $g.DrawPath($tpen, $tp); $tpen.Dispose(); $tp.Dispose()
         $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(237,237,241))
-        $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 9), [float]($tby + 4)); $ttb.Dispose()
+        $ty = [float]($tby + [Math]::Floor(($tbh - [int]$tipFont.Height) / 2))
+        if ($null -eq $chart) {
+            $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 9), $ty)
+        } else {
+            $g.DrawString($lead0, $tipFont, $ttb, [float]($tbx + 9), $ty)
+            $cx = $tbx + 9 + $wL + $SPARK_GAP
+            Draw-Spark $g $chart $cx ($tby + [int][Math]::Floor(($tbh - $SPARK_H) / 2))
+            if ($rest) {
+                $g.DrawString($rest, $tipFont, $ttb, [float]($cx + $SPARK_W + $SPARK_GAP), $ty)
+            }
+        }
+        $ttb.Dispose()
     }
 
     $g.Dispose()
@@ -310,7 +416,7 @@ $timer.Add_Tick({
         $script:lastUsage = $nowMs
         $j = Read-JsonFile $usageFile
         $s = -1; $w = -1; $sr = ""; $wr = ""; $st = $false
-        $pc = -1.0; $pj = -1; $hm = -1
+        $pc = -1.0; $pj = -1; $hm = -1; $hs = @()
         if ($j) {
             if ($null -ne $j.session_pct) { $s = [int]$j.session_pct; $sr = [string]$j.session_resets }
             if ($null -ne $j.weekly_pct)  { $w = [int]$j.weekly_pct;  $wr = [string]$j.weekly_resets }
@@ -320,12 +426,28 @@ $timer.Add_Tick({
             try { if ($null -ne $j.pace)      { $pc = [double]$j.pace } }     catch { $pc = -1.0 }
             try { if ($null -ne $j.projected) { $pj = [int]$j.projected } }   catch { $pj = -1 }
             try { if ($null -ne $j.hit_mins)  { $hm = [int]$j.hit_mins } }    catch { $hm = -1 }
+            # The readings behind the burn rate, for the sparkline. Guard the null explicitly:
+            # @($null).Count is 1 in PowerShell 5.1, so the usual @(...) idiom would report one
+            # phantom sample and the draw would then die indexing into it.
+            try {
+                if ($null -ne $j.history) {
+                    $hs = @(@($j.history) | Where-Object { $null -ne $_ -and @($_).Count -ge 2 })
+                }
+            } catch { $hs = @() }
         }
+        # A run of identical readings - 38, 38, 38 - moves none of the values above while the history
+        # keeps growing, and a flat window is exactly when that happens. So the chart needs its own
+        # change signal, or it would freeze precisely when it has something to say.
+        $hsig = ""
+        if ($hs.Count -gt 0) { $hsig = "$($hs.Count):$($hs[$hs.Count - 1][0])" }
+        $script:hist = $hs
         $left = if ($st) { "" } else { ResetShort $sr }     # a stale reading has no honest countdown
         if ($s -ne $script:sessionPct -or $w -ne $script:weeklyPct -or $st -ne $script:stale -or
             $sr -ne $script:sessionResets -or $wr -ne $script:weeklyResets -or
             $left -ne $script:sessionLeft -or $pc -ne $script:pace -or
-            $pj -ne $script:projected -or $hm -ne $script:hitMins) {
+            $pj -ne $script:projected -or $hm -ne $script:hitMins -or
+            ($script:hot -and $hsig -ne $script:histSig)) {   # a chart nobody is looking at can wait
+            $script:histSig = $hsig
             $script:sessionPct = $s; $script:weeklyPct = $w; $script:stale = $st
             $script:sessionResets = $sr; $script:weeklyResets = $wr
             $script:sessionLeft = $left

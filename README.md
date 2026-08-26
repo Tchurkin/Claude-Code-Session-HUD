@@ -193,6 +193,15 @@ multiple of it and the colour is past green within about five minutes.
 Until there are enough readings to fit a rate to — four spread over five minutes — the bar falls back
 to the plain thresholds rather than inventing a trend from two samples.
 
+Hovering shows a **sparkline** of those readings next to the projection, so "on pace for 46%" comes
+with the shape it was worked out from — a steady climb, a burst that's tailing off, or a flat line
+that just ticked up. It spans the samples' own range rather than 0–100, because twenty quiet minutes
+cover about two points and would otherwise be an invisible line along the bottom; but it never zooms
+in past a two-and-a-half point window, so a single rounding tick stays a step instead of becoming a
+cliff. An unchanging window draws flat through the middle. The chart appears and disappears with the
+projection it sits beside — same four-sample threshold — so you never get a picture without the
+sentence, or a sentence without the picture.
+
 The reading only moves in whole percentage points, so the rate comes from a least-squares fit across
 every sample rather than the difference between the first and last, which at these step sizes would
 be mostly quantization. Samples age out of the twenty-minute window on their own, so putting the
