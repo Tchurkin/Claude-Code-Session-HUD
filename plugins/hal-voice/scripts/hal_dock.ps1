@@ -117,7 +117,7 @@ $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })
 $form.Add_Shown({ [PerPixelLayered]::InitClickable($form.Handle); Assert-Topmost $form; & $render })
 $form.Add_MouseDown({
     param($sender, $e)
-    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    # Either button, same as the readout: nothing else claims a right-click out here.
     if (-not (InStrip)) { return }
     $script:lbWas = $true
     Set-DockStowed (-not (Dock-Stowed))

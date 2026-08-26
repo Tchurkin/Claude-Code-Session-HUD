@@ -7,7 +7,7 @@ looked right when it was written is exactly the kind of thing a later tidy-up qu
 
 Nothing here touches the real usage cache or the network - `fetch` is replaced throughout.
 """
-import os, re, subprocess, sys, tempfile
+import os, re, shutil, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import check                # noqa: E402  (also puts scripts/ on the path)
@@ -414,7 +414,7 @@ check(got["155"] == "2h 35m", "nor two thirty-five three hours (got %r)" % got["
 check(got["1440"] == "1d 0h", "a full day rolls into days (got %r)" % got["1440"])
 check(got["9000"] == "6d 6h", "and 150 hours is six and a bit days (got %r)" % got["9000"])
 check(got["10079"] == "6d 23h", "just under a week (got %r)" % got["10079"])
-check(got["short"] == "6d6h", "the compact headline form agrees (got %r)" % got["short"])
+check(got["short"] == "6d 6h", "the compact reading form agrees (got %r)" % got["short"])
 
 # The actual complaint: no reading may ever show two dozen hours or more.
 for k, v in got.items():
@@ -476,6 +476,117 @@ print("sparkline: flat sits at %.2f, one tick spans %.2f, a wide range uses the 
       % (sn["flat"][0], rise))
 
 
-import shutil                                            # noqa: E402
+# -- 10. a window that ended while we could not ask -----------------------------------------------
+# The failure that stops us asking - a token that expires while the machine sleeps - is exactly the
+# one that lasts long enough for a five-hour window to roll over underneath it. Holding up last
+# night's number is not "old data", it is a specific wrong number, and greying it only claims the
+# first. When the reset time has passed and nothing is running, the truth is zero and we can say so.
+tmp2 = tempfile.mkdtemp(prefix="hud-roll-")
+_sv = (hu.CACHE, hu.fetch)
+hu.CACHE = os.path.join(tmp2, "usage.json")
+hu.fetch = lambda timeout=10: None                    # the endpoint is unreachable throughout
+
+past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+soon = (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()
+weekpast = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+
+
+def _seed(resets, weekly_resets=None, **extra):
+    d = {"ts": int(time.time() * 1000) - 20 * 60 * 1000, "session_pct": 40, "session_util": 40.0,
+         "session_resets": resets, "weekly_pct": 12,
+         "weekly_resets": weekly_resets or (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+         "history": [[1, 40.0], [2, 40.0]], "burn": 0.17, "pace": 0.4, "projected": 44}
+    d.update(extra)
+    hu._publish(d)
+
+
+# Still inside the window: an old reading is just old, and must stay old.
+_seed(soon)
+hu.refresh()
+c = hu.read()
+check(c["session_pct"] == 40, "a stale reading inside its window is left alone (got %r)" % c["session_pct"])
+check(not c.get("inferred"), "and is not dressed up as knowledge")
+
+# Window ended, nothing running: zero, and say so.
+_seed(past)
+hu.refresh(active=False)
+c = hu.read()
+check(c["session_pct"] == 0, "a window past its reset reads zero (got %r)" % c["session_pct"])
+check(c.get("inferred") is True, "marked as worked out rather than measured")
+check(c.get("session_resets") is None,
+      "with no reset time invented - a fresh window has no anchor until you send something")
+check(c.get("history") == [], "the old window's samples go with it")
+check(c.get("burn") is None and c.get("pace") == 0.0, "and it is not burning anything")
+check(abs(c["ts"] - time.time() * 1000) < 5000,
+      "the timestamp moves, because this is current knowledge and should not read as stale")
+
+# Window ended but a chat is mid-turn: we are being spent right now and do not know how much.
+_seed(past)
+hu.refresh(active=True)
+c = hu.read()
+check(c["session_pct"] == 40, "with work in flight we do not claim zero (got %r)" % c["session_pct"])
+check(not c.get("inferred"), "and do not pretend to know")
+
+# The weekly window rolls far less often, but the same rule applies when it does.
+_seed(past, weekly_resets=weekpast)
+hu.refresh(active=False)
+c = hu.read()
+check(c["weekly_pct"] == 0, "a passed weekly reset zeroes too (got %r)" % c["weekly_pct"])
+_seed(past)
+hu.refresh(active=False)
+check(hu.read()["weekly_pct"] == 12, "but a weekly window still running is untouched")
+
+# And a real reading always wins: `inferred` is not sticky.
+_seed(past)
+hu.refresh(active=False)
+check(hu.read().get("inferred") is True, "inferred while the endpoint is down")
+hu.fetch = lambda timeout=10: {"ts": int(time.time() * 1000), "session_pct": 5, "session_util": 5.0,
+                               "session_resets": soon, "weekly_pct": 13, "weekly_resets": soon,
+                               "severity": "normal"}
+hu.refresh(force=True)
+c = hu.read()
+check(c["session_pct"] == 5 and not c.get("inferred"),
+      "and the moment the endpoint answers, the guess is gone (got %r/%r)"
+      % (c["session_pct"], c.get("inferred")))
+print("rollover: a spent window reads zero, unless something is running, and never outranks a fetch")
+
+
+# -- 11. an expired token is not a rate limit -------------------------------------------------------
+# They fail the same way and want opposite treatment. A 429 is asking to be left alone for minutes;
+# an expired token is fixed the instant you use Claude again, and sitting out ten minutes after that
+# leaves the meter stale for no reason at all. This is what kept it grey for most of a night.
+def _fail_with(code):
+    err = Exception("boom")
+    err.code = code
+
+    def f(timeout=10):
+        raise_it = err
+        try:
+            raise raise_it
+        except Exception as e:
+            hu.globals_err = None
+        return None
+    return f
+
+
+for code, kind, ceiling in ((401, "auth", hu.AUTH_MAX_MS), (429, "rate", hu.FAIL_MAX_MS)):
+    waits = []
+    for n in range(4, 8):                       # deep into the backoff, where the ceiling bites
+        hu._publish({"fail_n": n, "session_resets": soon})
+        hu.LAST_ERR = kind                      # what fetch() would have recorded
+        hu.fetch = lambda timeout=10: None
+        t0 = time.time() * 1000
+        hu.refresh()
+        waits.append(int(round((hu.read()["next_try"] - t0) / 1000.0)))
+    check(max(waits) <= ceiling / 1000 + 1,
+          "%s failures cap at %ds (saw %r)" % (kind, ceiling / 1000, waits))
+check(hu.AUTH_MAX_MS < hu.FAIL_MAX_MS,
+      "and an expired token is retried sooner than a rate limit (%d vs %d)"
+      % (hu.AUTH_MAX_MS, hu.FAIL_MAX_MS))
+print("backoff: auth caps at %ds, rate limits at %ds" % (hu.AUTH_MAX_MS / 1000, hu.FAIL_MAX_MS / 1000))
+
+hu.CACHE, hu.fetch = _sv
+shutil.rmtree(tmp2, ignore_errors=True)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - pace maths, backoff and the shipped colour ramp all hold")

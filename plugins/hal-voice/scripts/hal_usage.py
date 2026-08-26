@@ -28,6 +28,13 @@ CACHE       = os.path.join(hc.DATA_DIR, "usage.json")
 ENDPOINT    = "https://api.anthropic.com/api/oauth/usage"
 POLL_MS     = 60000          # base for the failure backoff, and the cadence when in any doubt
 FAIL_MAX_MS = 600000         # ... and when one fails, back off rather than hammering
+AUTH_MAX_MS = 60000          # ... except an expired token, which heals itself the moment you work
+
+# Why the last fetch failed, so the backoff can tell "leave the endpoint alone" from "wait for
+# Claude Code to renew the token". They want very different ceilings: a rate limit is asking to be
+# left alone for minutes, whereas an expired token is fixed the instant you use Claude again, and
+# sitting out ten minutes after that means the meter is stale for no reason.
+LAST_ERR = None
 
 # How often to ask, by whether anything is actually being spent. A fixed cadence spends the same
 # request budget on a frozen number as on a moving one, and this endpoint rate-limits: a day of three
@@ -83,6 +90,7 @@ def fetch(timeout=10):
     tok = _token()
     if not tok:
         return None
+    globals()["LAST_ERR"] = None
     try:
         req = urllib.request.Request(ENDPOINT, headers={
             "Authorization": "Bearer %s" % tok,
@@ -92,7 +100,10 @@ def fetch(timeout=10):
         })
         with urllib.request.urlopen(req, timeout=timeout) as r:
             d = json.loads(r.read().decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        code = getattr(e, "code", None)
+        globals()["LAST_ERR"] = ("auth" if code in (401, 403) else
+                                 "rate" if code == 429 else "net")
         return None
     if not isinstance(d, dict):
         return None
@@ -109,8 +120,8 @@ def fetch(timeout=10):
 
 
 # -- which way it's heading -------------------------------------------------------------------
-def mins_until(iso):
-    """Minutes until an ISO timestamp, or None if it isn't one. Never negative."""
+def epoch_ms(iso):
+    """An ISO timestamp as epoch milliseconds, or None. Not clamped, unlike mins_until."""
     if not iso:
         return None
     try:
@@ -118,9 +129,20 @@ def mins_until(iso):
         t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
         if t.tzinfo is None:
             t = t.replace(tzinfo=timezone.utc)
-        return max(0.0, (t - datetime.now(timezone.utc)).total_seconds() / 60.0)
+        return t.timestamp() * 1000.0
     except Exception:
         return None
+
+
+def mins_until(iso):
+    """Minutes until an ISO timestamp, or None if it isn't one. Never negative - a window that has
+    already reset has zero left, not a negative amount. Compare timestamps with epoch_ms instead:
+    this clamp makes any two past times look identical."""
+    t = epoch_ms(iso)
+    if t is None:
+        return None
+    import time as _t
+    return max(0.0, (t - _t.time() * 1000.0) / 60000.0)
 
 
 def same_window(a, b, tol_s=WINDOW_TOL_S):
@@ -136,10 +158,12 @@ def same_window(a, b, tol_s=WINDOW_TOL_S):
         return True
     if not a or not b:
         return False
-    ta, tb = mins_until(a), mins_until(b)
+    # epoch_ms, not mins_until: that one clamps at zero, so two windows that have BOTH already
+    # reset would compare as identical however far apart they actually were.
+    ta, tb = epoch_ms(a), epoch_ms(b)
     if ta is None or tb is None:
         return False                                  # unparseable: fall back to the text compare
-    return abs(ta - tb) * 60.0 <= tol_s
+    return abs(ta - tb) <= tol_s * 1000.0
 
 
 def _keep(hist, sample, resets, prev_resets):
@@ -345,7 +369,12 @@ def refresh(force=False, active=None):
         # retry after a 429 come twice as fast, in exactly the case the endpoint asked us to stop.
         n = int(_num(cur, "fail_n")) + 1
         cur["fail_n"] = n
-        cur["next_try"] = now + max(wait, min(FAIL_MAX_MS, POLL_MS * (2 ** min(n - 1, 6))))
+        ceiling = AUTH_MAX_MS if LAST_ERR == "auth" else FAIL_MAX_MS
+        cur["next_try"] = now + max(wait, min(ceiling, POLL_MS * (2 ** min(n - 1, 6))))
+        cur["err"] = LAST_ERR
+        # The window we last measured may have ended while we were unable to ask about it. Then the
+        # number we are holding is not merely old, it is wrong, and we can say so without the API.
+        _infer_rollover(cur, now, active)
         _publish(cur)
         return cur                                     # keep showing the last good numbers
     util = got.get("session_util")
@@ -368,6 +397,34 @@ def refresh(force=False, active=None):
         got["pace_alert"] = got["ts"]       # unclaimed; whoever raises it calls clear_alert()
     _publish(got)
     return got
+
+
+def _infer_rollover(cur, now, active):
+    """A five-hour window that has passed its reset is spent and gone: the next one starts empty.
+
+    Worth doing without the API because the failure that keeps us from asking - a token that expired
+    while the machine slept - is exactly the failure that lasts long enough for a window to roll
+    over underneath it. Holding up last night's 40% is worse than useless; it is a specific wrong
+    number, and greying it out only says "this is old", not "this is no longer true".
+
+    Only when nothing is running. If a chat is mid-turn we are being spent right now, and the honest
+    answer is that we do not know how much - which is what stale already means."""
+    if active:
+        return False
+    left = mins_until(cur.get("session_resets"))
+    if left is None or left > 0:
+        return False
+    cur.update({"session_pct": 0, "session_util": 0.0, "session_resets": None,
+                "history": [], "burn": None, "pace": 0.0, "projected": 0,
+                "hit_mins": None, "pace_hot": False})
+    wl = mins_until(cur.get("weekly_resets"))
+    if wl is not None and wl <= 0:
+        cur.update({"weekly_pct": 0, "weekly_resets": None})
+    # `ts` moves, because this IS current knowledge rather than an old reading - but `inferred`
+    # marks it so the meter can say where the number came from, and any real fetch clears it.
+    cur["ts"] = int(now)
+    cur["inferred"] = True
+    return True
 
 
 def clear_alert():

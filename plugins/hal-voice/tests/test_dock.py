@@ -184,16 +184,16 @@ check(not re.search(r"InStrip[\s\S]{0,400}?\$cp\.X -lt", DOCK),
 # The meter's readout is the button, not just the 62px of bar - the percentage and the countdown
 # above it are the bigger target and were previously outside it entirely.
 check("$script:hitL" in METER and "$script:hitR" in METER, "the meter records what it drew")
-check(re.search(r"\$left = \$barR - \[Math\]::Max\(\$UW, \$hw\)", METER),
-      "the box spans the bar OR the headline, whichever is wider")
+check(re.search(r"\$script:hitL = \$barR - \[Math\]::Max\(\$UW, \$hw\)", METER),
+      "the box spans the bar or the reading, whichever is wider")
 check(re.search(r"\$x0 = \$form\.Left \+ \$script:hitL; \$x1 = \$form\.Left \+ \$script:hitR", METER),
       "and the hit test reads it back rather than re-deriving a stale box")
 check(not re.search(r"\$cp\.X -lt \(\$mx \+ \$UW\)", METER),
       "the old bar-only box is gone")
-check(re.search(r"FromArgb\(3, 0, 0, 0\)", METER),
-      "an all-but-invisible backing rect makes the gaps between glyphs clickable too - without it "
-      "the text looks like a button and behaves like a colander")
-check(re.search(r"FillRectangle\(\$hit, \$script:hitL", METER), "and it covers exactly the hit box")
+check(re.search(r"\$ha = if \(\$script:hot\) \{ 26 \} else \{ 3 \}", METER),
+      "an all-but-invisible backing plate makes the gaps between glyphs clickable too - without it "
+      "the readout looks like a button and behaves like a colander - and doubles as the hover cue")
+check(re.search(r"RoundedPath \(\$script:hitL\)", METER), "and it covers exactly the hit box")
 print("hit boxes: handle runs to the screen edge, meter covers its whole readout")
 
 

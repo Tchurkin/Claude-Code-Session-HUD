@@ -10,12 +10,16 @@ param(
 # Both come from the real figures Claude reports (hal_usage.py), not a local estimate, and both grey
 # out when the reading has gone stale rather than showing an old number as though it were current.
 #
-# The bars are a button: clicking them opens a detail panel above the stack with the numbers the
-# bars cannot carry - the burn rate, tokens a minute, where the window lands, and the last twenty
-# minutes at a readable size. Only the drawn pixels take a click (a layered window is hit-tested
-# against its alpha), and the window never takes focus, so the editor keeps the caret. Hover is
-# still found by polling the cursor rather than by mouse events - the hint the meter draws is
-# itself opaque, so enter/leave events would chase their own tail.
+# The readout is a button: either mouse button opens a detail panel above the stack with everything
+# the bars cannot carry - the burn rate, tokens a minute, where the window lands, and the last
+# twenty minutes at a readable size. There is no hover tooltip; the panel says all of it, and saying
+# it twice was clutter. Hover only lifts a faint plate behind the readout, so it still looks like
+# something you can press.
+#
+# Only the drawn pixels take a click - a layered window is hit-tested against its alpha - and the
+# window never takes focus, so the editor keeps the caret. Hover is found by polling the cursor
+# rather than by mouse events, because the window slides under a stationary pointer and enter/leave
+# are generated from mouse messages, not from windows moving.
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -28,10 +32,12 @@ if (-not $created) { exit }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $GLOW = 10
-$TIP_W = 600                                       # room to the LEFT for the hover hint
+# One line - "7% - 4h 47m" - over the two bars. $TIP_W used to be 600px of room for a hover hint;
+# now it is just enough slack for the reading to overhang the bar it sits above.
+$TIP_W = 80                                        # canvas slack for the text to overhang the bar
 $OX = $TIP_W
 $UW = 62                                           # bar width
-$UPCT_H = 15                                       # room for the percentage text
+$UPCT_H = 15                                       # room for the reading
 $SBAR_H = 6                                        # session bar (the one that matters)
 $WBAR_H = 3                                        # weekly bar
 $GAP_BARS = 3
@@ -39,14 +45,10 @@ $CONTENT_H = $UPCT_H + 2 + $SBAR_H + $GAP_BARS + $WBAR_H
 $FORM_W = $UW + $GLOW*2 + $TIP_W
 $FORM_H = $CONTENT_H + $GLOW*2
 $uFont   = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$tipFont = New-Object System.Drawing.Font("Segoe UI", 9)
 
-# The sparkline in the hover hint: the last twenty minutes of readings, which hal_usage already keeps
-# for the burn-rate fit and would otherwise throw away. No axes, no gridlines, no track - just the
-# shape, so "on pace for 46%" comes with the thing it was worked out from.
-$SPARK_W = 60; $SPARK_H = 14; $SPARK_GAP = 8
-$SPARK_MIN = 4          # deliberately hal_usage.MIN_SAMPLES: the chart appears with the pace clause
-$SPARK_MIN_SPAN = 2.5   # utilization points; never zoom in past this (see SparkNorm)
+# How many readings before a chart of them means anything. Deliberately hal_usage.MIN_SAMPLES, so
+# the panel's sparkline appears at the same moment the burn rate it sits beside does.
+$SPARK_MIN = 4
 
 $script:hot = $false; $script:closeReq = $false
 $script:sessionPct = -1; $script:weeklyPct = -1
@@ -67,6 +69,7 @@ $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
 $script:lastFrame = 0
 # What the readout currently occupies, in canvas coords - set by the render, read by Over-Bar.
 $script:hitL = 0; $script:hitR = 0
+$script:inferred = $false  # the window rolled over while we could not ask: worked out, not read
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -194,65 +197,16 @@ function PaceColor($p, $isStale) {
 # scaling would give and which reads as "you have used nothing".
 #
 # `,$out` so PowerShell returns the array whole instead of unrolling it into the pipeline - a
-# one-element result would otherwise come back as a bare double.
-function SparkNorm($us, $minSpan) {
-    $n = @($us).Count
-    if ($n -lt 1) { return ,@() }
-    $lo = [double]$us[0]; $hi = $lo
-    foreach ($u in $us) { $v = [double]$u; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
-    if (($hi - $lo) -lt $minSpan) {
-        $mid = ($hi + $lo) / 2.0
-        $lo = $mid - $minSpan / 2.0; $hi = $mid + $minSpan / 2.0
-    }
-    $span = $hi - $lo
-    $out = New-Object 'double[]' $n
-    for ($i = 0; $i -lt $n; $i++) {
-        $f = ([double]$us[$i] - $lo) / $span
-        if ($f -lt 0) { $f = 0.0 } elseif ($f -gt 1) { $f = 1.0 }
-        $out[$i] = $f
-    }
-    return ,$out
-}
-
-function Draw-Spark($g, $hist, $x, $y) {
-    $n = @($hist).Count
-    if ($n -lt 2) { return }                 # DrawLines throws on a single point
-    try {
-        $ts = New-Object 'double[]' $n; $us = New-Object 'double[]' $n
-        for ($i = 0; $i -lt $n; $i++) { $ts[$i] = [double]$hist[$i][0]; $us[$i] = [double]$hist[$i][1] }
-        $f = SparkNorm $us $SPARK_MIN_SPAN
-        $t0 = $ts[0]; $dt = $ts[$n - 1] - $t0
-        $pts = New-Object 'System.Drawing.PointF[]' $n
-        for ($i = 0; $i -lt $n; $i++) {
-            # x by timestamp, not index. The poll cadence is adaptive, so a four-minute gap and a
-            # forty-five-second one are not the same amount of time and must not draw the same width.
-            $fx = if ($dt -le 0) { $i / [double]($n - 1) } else { ($ts[$i] - $t0) / $dt }
-            $pts[$i] = [System.Drawing.PointF]::new(
-                [single]($x + $fx * ($SPARK_W - 1)),
-                [single]($y + ($SPARK_H - 1) - $f[$i] * ($SPARK_H - 1)))   # inverted: more is higher
-        }
-        $col = if ($script:pace -ge 0) { PaceColor $script:pace $script:stale }
-               else { BarColor $script:sessionPct $script:stale }
-        $pen = New-Object System.Drawing.Pen $col, 1.4
-        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
-        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
-        $g.DrawLines($pen, $pts); $pen.Dispose()
-        $dot = New-Object System.Drawing.SolidBrush $col      # mark "now", legible at 60x14
-        $g.FillEllipse($dot, [single]($pts[$n - 1].X - 2.0), [single]($pts[$n - 1].Y - 2.0), 4.0, 4.0)
-        $dot.Dispose()
-    } catch { }        # a torn read must never take the whole paint loop down with it
-}
-# Compact form for the headline: "43min", "2h14m", "now". The long form goes in the hover hint.
+# Compact form for the readout: "43min", "2h14m", "now". The panel spells it out in full.
 function ResetShort($iso) {
     if (-not $iso) { return "" }
     try {
         $mins = [int]((([datetime]$iso).ToUniversalTime() - [datetime]::UtcNow).TotalMinutes)
         if ($mins -le 0) { return "now" }
-        if ($mins -lt 60) { return "${mins}min" }
+        if ($mins -lt 60) { return "${mins}m" }
         $h = [int][Math]::Floor($mins / 60)              # see MinsLong: [int] would round up
-        if ($h -lt 24) { return "{0}h{1:00}m" -f $h, ($mins % 60) }
-        return "{0}d{1}h" -f [int][Math]::Floor($h / 24), ($h % 24)
+        if ($h -lt 24) { return "{0}h {1}m" -f $h, ($mins % 60) }
+        return "{0}d {1}h" -f [int][Math]::Floor($h / 24), ($h % 24)
     } catch { return "" }
 }
 # Days once there are more than a day of them: the weekly window is often 150-odd hours out, and
@@ -313,115 +267,27 @@ $render = {
         }
         $ptc = if ($script:stale) { [System.Drawing.Color]::FromArgb(170,170,176) }
                else { [System.Drawing.Color]::FromArgb(244,244,248) }
-        # "7% / 2h14m" - how much of the window is gone AND how long until it rolls over. The
-        # percentage on its own tells you where you stand but not how long you have to spend it.
-        $head = if ($script:sessionLeft) { "$sp% / $($script:sessionLeft)" } else { "$sp%" }
+        # "7% - 4h 47m": where you stand, and how long you have to spend it. The percentage on its
+        # own tells you the first and not the second.
+        $head = if ($script:sessionLeft) { "$sp% - $($script:sessionLeft)" }
+                elseif ($script:inferred) { "$sp% - new" }
+                else { "$sp%" }
+        if ($script:parked -gt 0) { $head = "+$($script:parked)  $head" }
         $hw = [int][Math]::Ceiling($g.MeasureString($head, $uFont).Width)
-        $left = $barR - [Math]::Max($UW, $hw)
-        $pk = ""
-        if ($script:parked -gt 0) {
-            $pk = "+$($script:parked)"
-            $left = [Math]::Min($left, ($barR - $hw - 8 - [int][Math]::Ceiling($g.MeasureString($pk, $uFont).Width)))
-        }
-        $script:hitL = $left - 4; $script:hitR = $barR + 4
+        $script:hitL = $barR - [Math]::Max($UW, $hw) - 4
+        $script:hitR = $barR + 4
 
         # A layered window is hit-tested on alpha, so the gaps BETWEEN glyphs are holes a click falls
-        # straight through - the text would look like a button and behave like a colander. An alpha
-        # of 3 over the whole readout is invisible on any display and makes every pixel of it live.
-        $hit = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(3, 0, 0, 0))
-        $g.FillRectangle($hit, $script:hitL, ($GLOW - 3), ($script:hitR - $script:hitL), ($CONTENT_H + 6))
-        $hit.Dispose()
+        # straight through - the readout would look like a button and behave like a colander. An
+        # alpha of 3 over the whole thing is invisible on any display and makes every pixel live.
+        # It doubles as the hover shape: at 26 it is a faint plate, which is the only affordance
+        # left now that the tooltip is gone.
+        $ha = if ($script:hot) { 26 } else { 3 }
+        $hit = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($ha, 210, 210, 220))
+        $hp = RoundedPath ($script:hitL) ($GLOW - 4) ($script:hitR - $script:hitL) ($CONTENT_H + 8) 4
+        $g.FillPath($hit, $hp); $hit.Dispose(); $hp.Dispose()
 
         Draw-OutlinedText $g $head $uFont $ptc $barR ($GLOW + 1) 3 'right'
-        # Tabs pushed off the top of the dock. Sits to the left of the reading, dimmer, so the stack
-        # never just loses tabs silently - they are parked, not gone, and they come back.
-        if ($pk) {
-            Draw-OutlinedText $g $pk $uFont ([System.Drawing.Color]::FromArgb(188,188,196)) `
-                              ($barR - $hw - 8) ($GLOW + 1) 3 'right'
-        }
-    }
-
-    if ($script:hot -and $script:sessionPct -ge 0) {
-        # Built as clauses in order of importance, then trimmed from the least important end until
-        # what is left fits the room beside the bar. Measuring beats sizing it by eye: the same
-        # string is a different width in a different font or at a different DPI, and the old fixed
-        # box quietly cut the end off rather than telling anyone. The weekly window goes first - it
-        # is the least binding of the three - and the session line always survives.
-        $lead = "session $($script:sessionPct)%"
-        $sIn = ResetIn $script:sessionResets
-        if ($sIn) { $lead += " - resets in $sIn" }
-        if ($script:stale) { $lead = "(last known) " + $lead }
-        $parts = @($lead)
-        # The bar's colour is a glance; this is the sentence behind it.
-        if ($script:pace -ge 0) {
-            if ($script:hitMins -ge 0 -and $script:pace -gt 0.5) {
-                $parts += "limit in ~$(MinsLong $script:hitMins)"
-            } elseif ($script:projected -ge 0) {
-                $parts += "on pace for $($script:projected)%"
-            }
-        }
-        if ($script:parked -gt 0) {
-            $parts += "$($script:parked) tab$(if ($script:parked -ne 1) { 's' }) parked - no room"
-        }
-        if ($script:weeklyPct -ge 0) {
-            $wk = "weekly $($script:weeklyPct)%"
-            $wIn = ResetIn $script:weeklyResets
-            if ($wIn) { $wk += " - $wIn" }
-            $parts += $wk
-        }
-        $room = $GLOW + $OX - 12                       # all the space left of the bar, less a margin
-        # The chart shows up exactly when the pace clause does - same sample threshold - so the
-        # picture and the sentence worked out from it arrive and leave together.
-        $chart = $null
-        if ($script:pace -ge 0 -and @($script:hist).Count -ge $SPARK_MIN) { $chart = @($script:hist) }
-
-        if ($null -eq $chart) {
-            $tip = $parts -join "     "
-            $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
-            while ($parts.Count -gt 1 -and ($tw + 18) -gt $room) {
-                $parts = @($parts[0..($parts.Count - 2)])
-                $tip = $parts -join "     "
-                $tw = [int][Math]::Ceiling($g.MeasureString($tip, $tipFont).Width)
-            }
-            $tbw = $tw + 18
-        } else {
-            # [9][ lead ][gap][ chart ][gap][ rest ][9] - the chart sits between "session 39%..." and
-            # "on pace for 46%", next to the number it explains. Measured segment by segment rather
-            # than as one string: GDI+ trims trailing whitespace, so the joined width of a run that
-            # ends in a separator is not the width of its parts.
-            $lead0 = $parts[0]
-            $wL = [int][Math]::Ceiling($g.MeasureString($lead0, $tipFont).Width)
-            while ($true) {
-                $rest = if ($parts.Count -gt 1) { $parts[1..($parts.Count - 1)] -join "     " } else { "" }
-                $wR = if ($rest) { [int][Math]::Ceiling($g.MeasureString($rest, $tipFont).Width) } else { 0 }
-                $chartW = $SPARK_GAP + $SPARK_W + $(if ($rest) { $SPARK_GAP } else { 0 })
-                $tbw = 18 + $wL + $chartW + $wR
-                if ($parts.Count -le 1 -or $tbw -le $room) { break }
-                $parts = @($parts[0..($parts.Count - 2)])
-            }
-        }
-        $tbh = [Math]::Max(([int]$tipFont.Height + 8), ($SPARK_H + 10))
-        $tbx = $GLOW + $OX - 10 - $tbw
-        if ($tbx -lt 2) { $tbx = 2 }
-        $tby = $GLOW + [int][Math]::Floor(($CONTENT_H - $tbh)/2)
-        $tp = RoundedPath $tbx $tby $tbw $tbh 5
-        $tbg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246, 26, 26, 28))
-        $g.FillPath($tbg, $tp); $tbg.Dispose()
-        $tpen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120, 200, 200, 210)), 1
-        $g.DrawPath($tpen, $tp); $tpen.Dispose(); $tp.Dispose()
-        $ttb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(237,237,241))
-        $ty = [float]($tby + [Math]::Floor(($tbh - [int]$tipFont.Height) / 2))
-        if ($null -eq $chart) {
-            $g.DrawString($tip, $tipFont, $ttb, [float]($tbx + 9), $ty)
-        } else {
-            $g.DrawString($lead0, $tipFont, $ttb, [float]($tbx + 9), $ty)
-            $cx = $tbx + 9 + $wL + $SPARK_GAP
-            Draw-Spark $g $chart $cx ($tby + [int][Math]::Floor(($tbh - $SPARK_H) / 2))
-            if ($rest) {
-                $g.DrawString($rest, $tipFont, $ttb, [float]($cx + $SPARK_W + $SPARK_GAP), $ty)
-            }
-        }
-        $ttb.Dispose()
     }
 
     $g.Dispose()
@@ -441,8 +307,11 @@ $render = {
 # refreshed here every two seconds. A separate process would have to duplicate the whole formatting
 # layer, invent a protocol to follow a window that eases every frame, and pay a PowerShell cold
 # start on every click.
-$PANEL_W = 360; $PANEL_H = 260; $PGLOW = 14; $PAD = 16; $COL = 328
-$PSPARK_W = 328; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
+# Narrow and tall rather than wide and short. The three rate figures used to sit in three columns,
+# which is what forced the width; as label-left / value-right rows they read at least as well and
+# let the whole thing come in by nearly a hundred pixels.
+$PANEL_W = 264; $PANEL_H = 302; $PGLOW = 14; $PAD = 14; $COL = 236
+$PSPARK_W = 236; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
 $fHero  = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
 $fBig   = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
 $fVal   = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
@@ -554,11 +423,20 @@ $renderPanel = {
     # what that means, in words
     $db = New-Object System.Drawing.SolidBrush $accent
     $g.FillEllipse($db, [float]$L, [float]($oy + 89), 7, 7); $db.Dispose()
-    TxtL (PaceWords $script:pace $script:projected $script:hitMins) $fBody $INK ($L + 13) 87
+    # Wraps rather than running off the edge - the panel is narrower than the sentence can be.
+    $words = (PaceWords $script:pace $script:projected $script:hitMins) -split ' '
+    $line = ""; $ly = 87; $wrapW = $COL - 13
+    foreach ($w in $words) {
+        $try = if ($line) { "$line $w" } else { $w }
+        if ([int][Math]::Ceiling($g.MeasureString($try, $fBody).Width) -gt $wrapW -and $line) {
+            TxtL $line $fBody $INK ($L + 13) $ly; $ly += 14; $line = $w
+        } else { $line = $try }
+    }
+    if ($line) { TxtL $line $fBody $INK ($L + 13) $ly }
 
     $hair = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(30,200,200,210)), 1
     $g.DrawLine($hair, $L, ($oy + 113), $R, ($oy + 113))
-    $g.DrawLine($hair, $L, ($oy + 152), $R, ($oy + 152))
+    $g.DrawLine($hair, $L, ($oy + 155), $R, ($oy + 155))
     $hair.Dispose()
 
     # weekly: rarely the binding limit, so it gets a line and a sliver
@@ -580,32 +458,29 @@ $renderPanel = {
         $wbar.Dispose()
     }
 
-    # three numbers, evenly spaced: what it costs now, what it costs in tokens, where it ends up
-    $cw = 104; $c1 = $L; $c2 = $L + 112; $c3 = $L + 224
-    TxtL "BURN"     $fEye $DIM $c1 161
-    TxtL "TOKENS"   $fEye $DIM $c2 161
-    TxtL "AT RESET" $fEye $DIM $c3 161
-    $burnTxt = if ($script:burn -ge 0) { "{0:N2}" -f $script:burn } else { "-" }
-    Draw-OutlinedText $g $burnTxt $fVal $INK $c1 ($oy + 172) 1.5 'left'
-    $bwid = [int][Math]::Ceiling($g.MeasureString($burnTxt, $fVal).Width)
-    TxtL "%/min" $fMicro $DIMMER ($c1 + $bwid - 2) 176
-    $tokTxt = if ($script:tpm -ge 0) { Fmt-Count $script:tpm } else { "-" }
-    Draw-OutlinedText $g $tokTxt $fVal $INK $c2 ($oy + 172) 1.5 'left'
-    $twid = [int][Math]::Ceiling($g.MeasureString($tokTxt, $fVal).Width)
-    TxtL "/min" $fMicro $DIMMER ($c2 + $twid - 2) 176
+    # Three rows, label left and value right. In a narrow panel that reads better than columns and
+    # each value gets the whole width it needs instead of a third of it.
+    $burnTxt = if ($script:burn -ge 0) { "{0:N2} %/min" -f $script:burn } else { "-" }
+    $tokTxt  = if ($script:tpm -ge 0) { (Fmt-Count $script:tpm) + " /min" } else { "-" }
     $projTxt = if ($script:projected -ge 0 -and -not $script:stale) { "$($script:projected)%" } else { "-" }
-    Draw-OutlinedText $g $projTxt $fVal $accent $c3 ($oy + 172) 1.5 'left'
+    $rows = @(@("BURN", $burnTxt, $INK), @("TOKENS", $tokTxt, $INK), @("AT RESET", $projTxt, $accent))
+    $ry = 164
+    foreach ($row in $rows) {
+        TxtL $row[0] $fEye $DIM $L ($ry + 2)
+        Draw-OutlinedText $g $row[1] $fVal $row[2] $R ($oy + $ry) 1.5 'right'
+        $ry += 20
+    }
 
     # the last twenty minutes, big enough to read
-    TxtL "LAST 20 MIN" $fEye $DIM $L 194
+    TxtL "LAST 20 MIN" $fEye $DIM $L 236
     $h = @($script:hist)
     if ($h.Count -ge $SPARK_MIN) {
         $lo = 1000.0; $hi = -1.0
         foreach ($p in $h) { $v = [double]$p[1]; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
-        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R 194
-        Draw-Spark2 $g $h $L ($oy + 206) $PSPARK_W $PSPARK_H $accent
+        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R 236
+        Draw-Spark2 $g $h $L ($oy + 250) $PSPARK_W $PSPARK_H $accent
     } else {
-        TxtL "not enough readings yet" $fMicro $DIMMER ($L + 96) 194
+        TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) 236
     }
 
     $g.Dispose()
@@ -615,6 +490,39 @@ $renderPanel = {
 
 # The panel's chart. Same normalisation as the meter's, but wider, with the area under the line
 # filled - at 42px tall the shape reads better as a mass than as a stroke - and a marked "now".
+# Normalise utilization samples to 0..1 for the sparkline.
+#
+# Spans the samples' own min..max rather than 0..100, because a quiet twenty minutes covers about two
+# points and against a full scale would be an invisible straight line pinned to the bottom. But it
+# never zooms in past $minSpan: the reading only moves in whole points, so an unfloored auto-scale
+# turns a single 38->39 tick into a full-height cliff and the chart screams about a rounding step.
+#
+# The floor is centred on the data's midpoint, which also disposes of the all-equal case for free -
+# the span collapses below $minSpan, the window recentres, every sample comes back 0.5, and a flat
+# twenty minutes draws as a flat line down the MIDDLE. Not along the bottom, which is what 0..100
+# scaling would give and which reads as "you have used nothing".
+#
+# `,$out` so PowerShell returns the array whole instead of unrolling it into the pipeline - a
+# one-element result would otherwise come back as a bare double.
+function SparkNorm($us, $minSpan) {
+    $n = @($us).Count
+    if ($n -lt 1) { return ,@() }
+    $lo = [double]$us[0]; $hi = $lo
+    foreach ($u in $us) { $v = [double]$u; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
+    if (($hi - $lo) -lt $minSpan) {
+        $mid = ($hi + $lo) / 2.0
+        $lo = $mid - $minSpan / 2.0; $hi = $mid + $minSpan / 2.0
+    }
+    $span = $hi - $lo
+    $out = New-Object 'double[]' $n
+    for ($i = 0; $i -lt $n; $i++) {
+        $f = ([double]$us[$i] - $lo) / $span
+        if ($f -lt 0) { $f = 0.0 } elseif ($f -gt 1) { $f = 1.0 }
+        $out[$i] = $f
+    }
+    return ,$out
+}
+
 function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col) {
     $n = @($hist).Count
     if ($n -lt 2) { return }
@@ -674,10 +582,11 @@ $closePanel = {
 $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # focus stays in the editor
 $form.Add_Shown({ [PerPixelLayered]::InitClickable($form.Handle); Assert-Topmost $form; & $render })
 # The meter is a button now. Only the drawn pixels are clickable - a layered window is
-# hit-tested against its alpha - but the hover hint is drawn pixels too, so gate on the bar.
+# hit-tested against its alpha - so gate on the readout's own rect.
 $form.Add_MouseDown({
     param($sender, $e)
-    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    # Either button. A tab's right-click stows it, so that one is spoken for - the readout has no
+    # second meaning to collide with, and a control that ignores half your clicks is just annoying.
     if (-not (Over-Bar)) { return }
     $script:lbWas = $true            # this press must not also read as a click-away
     if ($script:panelOpen) { & $closePanel } else { & $openPanel }
@@ -702,7 +611,7 @@ $timer.Add_Tick({
         $script:lastUsage = $nowMs
         $j = Read-JsonFile $usageFile
         $s = -1; $w = -1; $sr = ""; $wr = ""; $st = $false
-        $pc = -1.0; $pj = -1; $hm = -1; $hs = @(); $bn = -1.0
+        $pc = -1.0; $pj = -1; $hm = -1; $hs = @(); $bn = -1.0; $inf = $false
         if ($j) {
             if ($null -ne $j.session_pct) { $s = [int]$j.session_pct; $sr = [string]$j.session_resets }
             if ($null -ne $j.weekly_pct)  { $w = [int]$j.weekly_pct;  $wr = [string]$j.weekly_resets }
@@ -713,6 +622,7 @@ $timer.Add_Tick({
             try { if ($null -ne $j.projected) { $pj = [int]$j.projected } }   catch { $pj = -1 }
             try { if ($null -ne $j.hit_mins)  { $hm = [int]$j.hit_mins } }    catch { $hm = -1 }
             try { if ($null -ne $j.burn)      { $bn = [double]$j.burn } }     catch { $bn = -1.0 }
+            try { $inf = [bool]$j.inferred } catch { $inf = $false }
             # The readings behind the burn rate, for the sparkline. Guard the null explicitly:
             # @($null).Count is 1 in PowerShell 5.1, so the usual @(...) idiom would report one
             # phantom sample and the draw would then die indexing into it.
@@ -744,13 +654,14 @@ $timer.Add_Tick({
             $sr -ne $script:sessionResets -or $wr -ne $script:weeklyResets -or
             $left -ne $script:sessionLeft -or $pc -ne $script:pace -or
             $pj -ne $script:projected -or $hm -ne $script:hitMins -or $bn -ne $script:burn -or
+            $inf -ne $script:inferred -or
             ($script:hot -and $hsig -ne $script:histSig)) {   # a chart nobody is looking at can wait
             $script:histSig = $hsig
             $script:sessionPct = $s; $script:weeklyPct = $w; $script:stale = $st
             $script:sessionResets = $sr; $script:weeklyResets = $wr
             $script:sessionLeft = $left
             $script:pace = $pc; $script:projected = $pj; $script:hitMins = $hm
-            $script:burn = $bn
+            $script:burn = $bn; $script:inferred = $inf
             & $render
             if ($script:panelOpen) { try { & $renderPanel } catch {} }
         }
@@ -776,7 +687,8 @@ $timer.Add_Tick({
     # The panel rides above the meter, which itself eases as the tab stack changes height, so it has
     # to follow. Click anywhere that is neither the button nor the panel and it goes away; the press
     # that opened it is marked so the same press cannot immediately close it again.
-    $lb = ([System.Windows.Forms.Control]::MouseButtons -band [System.Windows.Forms.MouseButtons]::Left) -ne 0
+    $lb = ([System.Windows.Forms.Control]::MouseButtons -band
+           ([System.Windows.Forms.MouseButtons]::Left -bor [System.Windows.Forms.MouseButtons]::Right)) -ne 0
     if ($script:panelOpen) {
         try {
             $wasL = $panel.Left; $wasT = $panel.Top

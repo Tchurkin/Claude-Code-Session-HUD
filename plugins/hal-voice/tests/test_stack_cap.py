@@ -141,7 +141,7 @@ check(int(tb["without"]) == 829 - (28 + 8) * 2 - 28, "and the surviving arithmet
 check("if ($e.h -le 0) { $parked++ }" in METER,
       "the meter counts parked tabs separately from the height it rides on")
 check("$info[2]" in METER, "and reads that count")
-check(re.search(r'"\+\$\(\$script:parked\)"', METER),
+check(re.search(r"\+\$\(\$script:parked\)", METER),
       "and shows it, so tabs are never silently gone")
 print("geometry: parked tabs cost nothing, and the meter says how many there are")
 
