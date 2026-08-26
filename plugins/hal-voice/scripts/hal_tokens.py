@@ -34,11 +34,29 @@ WINDOW_MS    = 10 * 60 * 1000  # rate window: shorter than the utilization fit, 
 HOT_MS       = 20 * 60 * 1000  # a file untouched this long is not worth stat-ing every pass
 MAX_IDS      = 4000            # recent message ids kept to dedup across a chunk boundary
 MAX_CHUNK    = 4 * 1024 * 1024 # bytes read from one file in one pass (a cold start could be huge)
+TOP_CHATS    = 4               # how many chats the panel has room to name
 
 # Relative to one Opus input token. Output is 5x input on every current model, so it factors out of
 # the per-model scalar; a cache read is a tenth, a 5-minute cache write 1.25, an hour one 2.
 W_OUT, W_READ, W_5M, W_1H = 5.0, 0.10, 1.25, 2.0
 MODEL_W = (("opus", 1.0), ("sonnet", 0.6), ("haiku", 0.2))
+
+
+def _sid_of(path):
+    """Which chat a transcript belongs to, from its path.
+
+    A chat's own transcript is ``<slug>/<sessionId>.jsonl``; anything its sub-agents ran lives under
+    ``<slug>/<sessionId>/subagents/...``. So the session id is either the file's stem or the
+    directory just above "subagents" - which is how a sub-agent's spend gets billed to the chat that
+    started it rather than floating free."""
+    parts = str(path).replace("\\", "/").split("/")
+    if "subagents" in parts:
+        i = parts.index("subagents")
+        raw = parts[i - 1] if i >= 1 else ""
+    else:
+        raw = os.path.splitext(parts[-1])[0] if parts else ""
+    keep = "".join(ch for ch in raw[:8] if ch.isalnum())      # matches hal_badge._sid8
+    return keep or "?"
 
 
 def _model_weight(name):
@@ -147,6 +165,21 @@ def _rate(samples, now, window=WINDOW_MS):
     return (w / mins, o / mins, c / mins)
 
 
+def by_chat(samples, now, window=WINDOW_MS, top=TOP_CHATS):
+    """Weighted tokens a minute, per chat, biggest first.
+
+    The one thing the HUD knew separately about tabs and about usage and never joined up: which of
+    the chats you have open is the one eating the window."""
+    lo = now - window
+    per = {}
+    for s in samples:
+        if len(s) >= 5 and s[0] >= lo:
+            per[s[4]] = per.get(s[4], 0.0) + float(s[1])
+    mins = window / 60000.0
+    rows = sorted(((sid, v / mins) for sid, v in per.items()), key=lambda r: -r[1])
+    return [[sid, int(round(v))] for sid, v in rows[:top] if v >= 1]
+
+
 def refresh(force=False):
     """Tail every recently-written transcript and republish the rates. Cheap enough for a 5s tick."""
     cur = read()
@@ -155,8 +188,9 @@ def refresh(force=False):
         return cur
 
     offsets = dict(cur.get("offsets") or {})
-    samples = [s for s in (cur.get("samples") or []) if isinstance(s, list) and len(s) == 4
+    samples = [s for s in (cur.get("samples") or []) if isinstance(s, list) and len(s) >= 4
                and s[0] >= now - WINDOW_MS]
+    total = float(cur.get("total") or 0.0)      # monotonic: what the live percentage extrapolates on
     seen = list(cur.get("ids") or [])
     seen_set = set(seen)
     files = list(cur.get("hot") or [])
@@ -173,6 +207,7 @@ def refresh(force=False):
             files = []
 
     for path in files:
+        sid = _sid_of(path)
         lines, offsets[path] = _read_new(path, int(offsets.get(path) or 0))
         for line in lines:
             if '"usage"' not in line:               # cheap reject: most records are not assistant turns
@@ -195,7 +230,14 @@ def refresh(force=False):
             ts = _iso_ms(e.get("timestamp")) or now
             w, o, c = weigh(u, m.get("model"))
             if w > 0:
-                samples.append([ts, round(w, 1), o, c])
+                samples.append([ts, round(w, 1), o, c, sid])
+                # Only spend from inside the window counts toward the running total. A cold start
+                # tails up to four megabytes of existing transcript, and every one of those records
+                # is history, not something that just happened - counting them would inject a
+                # phantom of hundreds of thousands of tokens with no matching movement in the plan's
+                # own figure, which is exactly the pair that would ruin the calibration.
+                if ts >= now - WINDOW_MS:
+                    total += w
 
     samples = [s for s in samples if s[0] >= now - WINDOW_MS]
     samples.sort(key=lambda s: s[0])
@@ -208,9 +250,9 @@ def refresh(force=False):
 
     tpm, opm, cpm = _rate(samples, now)
     out = {"ts": now, "scan_ts": scanned, "hot": files, "offsets": offsets,
-           "samples": samples, "ids": seen,
+           "samples": samples, "ids": seen, "total": round(total, 1),
            "tpm": int(round(tpm)), "opm": int(round(opm)), "cpm": int(round(cpm)),
-           "n": len(samples)}
+           "n": len(samples), "by_chat": by_chat(samples, now)}
     _publish(out)
     return out
 
@@ -224,3 +266,5 @@ if __name__ == "__main__":
              "{:,}".format(u.get("cpm", 0)), u.get("n", 0), WINDOW_MS / 60000,
              (time.time() - t0) * 1000))
     print("tailing %d recently-written transcripts" % len(u.get("hot") or []))
+    for sid, v in (u.get("by_chat") or []):
+        print("   %-10s %s weighted/min" % (sid, "{:,}".format(v)))

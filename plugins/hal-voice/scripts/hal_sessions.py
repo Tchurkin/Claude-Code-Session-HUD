@@ -431,12 +431,15 @@ def reconcile():
     if cfg.get("usage_meter", True):
         # Tokens come from the transcripts, so they cost nothing but disk and can be far fresher
         # than the plan's own figure - which is why they live in their own file on their own clock.
+        tok = None
         if _IS_DAEMON:
             try:
-                hal_tokens.refresh()         # self-throttled to 5s; ~35ms of tailing
+                tok = (hal_tokens.refresh() or {}).get("total")   # self-throttled to 5s, ~35ms
             except Exception:
                 pass
-        u = hal_usage.refresh(active=busy)   # 45s while a chat is running, 4 min while nothing is
+        # The token total goes in so the reading can be carried forward between fetches; see
+        # hal_usage.live_util. Passed rather than imported, to keep hal_usage free of dependencies.
+        u = hal_usage.refresh(active=busy, tok_total=tok)
         # Only the daemon raises it. reconcile() also runs inline inside every hook, and two
         # processes reading `pace_alert` before either clears it would chime twice; there is exactly
         # one daemon (a named mutex sees to that), so gating here removes the race rather than

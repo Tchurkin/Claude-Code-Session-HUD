@@ -54,6 +54,26 @@ MIN_SPAN_MS    = 5 * 60 * 1000
 MAX_SAMPLES    = 240         # backstop; the window trim is what normally bounds this
 WINDOW_DROP    = 3.0         # a fall this size means a new window, not a rounding wobble
 WINDOW_TOL_S   = 120.0       # reset times this close are the same window (the API's jitters by ~1s)
+LONG_EVERY_MS  = 60000       # one sample a minute, kept for the whole window, purely to be drawn
+LONG_MAX       = 400         # five hours of them, plus slack
+
+# Turning local token spend into a live percentage. The endpoint answers every 45s at best and only
+# in whole points, so between answers the number is frozen and a burn rate fitted to it needs five
+# minutes of samples before it says anything. Tokens are measured here, continuously, and the two
+# track each other closely enough to interpolate - so the reading between fetches is the last real
+# one plus what we have spent since, and every fetch snaps it back to the truth.
+#
+# The conversion is never hardcoded: it is fitted from consecutive readings, so it follows the plan
+# rather than assuming one. CAL_STEP is the utilization gap a pair must span before it is trusted -
+# at ±0.5 of quantization on each end, a 1-point gap is 50% error and a 4-point gap is 12%.
+CAL_STEP       = 4.0
+CAL_PAIRS      = 8           # how many recent pairs the fit averages over
+# Used only until a real fit exists, so the reading is live from the first minute rather than from
+# the first time the window happens to move four points. Being wrong here costs almost nothing: the
+# extrapolation only ever spans one poll interval, so at a heavy 60k tokens a minute even a rate
+# that is twice off mis-states the reading by a third of a point before the next fetch corrects it.
+# Measured on this machine at 276k-420k across two independent methods.
+PER_PT_DEFAULT = 320000.0
 
 # Telling you once, at the moment it becomes true, that this window is going to run out early.
 # Two thresholds rather than one: against a single 0.5 boundary a pace sitting at 0.499/0.501 crosses
@@ -295,6 +315,75 @@ def _red_edge(prev_hot, p, rolled_over):
     return (bool(prev_hot), False)
 
 
+def _calibrate(cur, util, total, rolled):
+    """Fit weighted-tokens-per-utilization-point from consecutive readings, in place.
+
+    Only across a gap wide enough to survive the API's whole-point rounding, and never across a
+    window rollover - utilization falls off a cliff there and the pair would be nonsense."""
+    if total is None or util is None:
+        return
+    fu, ft = cur.get("cal_from_util"), cur.get("cal_from_tok")
+    if rolled or fu is None or ft is None or util < fu:
+        cur["cal_from_util"], cur["cal_from_tok"] = util, total
+        return
+    du, dt = util - float(fu), total - float(ft)
+    if du < CAL_STEP or dt <= 0:
+        return                                        # not yet a pair worth learning from
+    pairs = [x for x in (cur.get("cal") or []) if isinstance(x, (list, tuple)) and len(x) == 2]
+    # Reject a pair that disagrees wildly with what we already believe. One bad reading - a daemon
+    # restart that re-tails a transcript, a machine that slept through half a window - would
+    # otherwise drag the fit somewhere it takes hours to climb back from.
+    if pairs:
+        known = sum(x[1] for x in pairs) / max(1e-9, sum(x[0] for x in pairs))
+        this = dt / du
+        if known > 0 and (this > known * 4 or this < known / 4):
+            cur["cal_from_util"], cur["cal_from_tok"] = util, total
+            return
+    pairs.append([round(du, 3), round(dt, 1)])
+    cur["cal"] = pairs[-CAL_PAIRS:]
+    cur["cal_from_util"], cur["cal_from_tok"] = util, total
+    su = sum(x[0] for x in cur["cal"])
+    st = sum(x[1] for x in cur["cal"])
+    if su > 0 and st > 0:
+        cur["per_pt"] = round(st / su, 1)             # weighted tokens per utilization point
+
+
+def live_util(cur, total):
+    """The reading, brought up to date with what has been spent since it was taken.
+
+    Returns None when there is nothing to add to - no calibration yet, or no token figure - so the
+    caller falls back to the last measured value rather than to a guess."""
+    if total is None:
+        return None
+    per = cur.get("per_pt") or PER_PT_DEFAULT
+    au, at = cur.get("anchor_util"), cur.get("anchor_tok")
+    if per <= 0 or au is None or at is None:
+        return None
+    try:
+        extra = (float(total) - float(at)) / float(per)
+    except Exception:
+        return None
+    if extra < 0:
+        extra = 0.0                                   # the counter only ever climbs; a fall is a restart
+    return max(0.0, min(100.0, float(au) + extra))
+
+
+def _keep_long(cur, ts, util, rolled):
+    """A coarser history than the burn fit needs, kept for the whole window so the panel can draw
+    the shape of the session rather than the last twenty minutes of it."""
+    lg = [] if rolled else [x for x in (cur.get("long") or [])
+                            if isinstance(x, (list, tuple)) and len(x) == 2]
+    if util is None:
+        return lg
+    if not lg or ts - lg[-1][0] >= LONG_EVERY_MS:
+        lg.append([ts, util])
+    elif util > lg[-1][1]:
+        # Within the same minute, keep the higher reading but NOT its timestamp - moving that would
+        # push the bucket forward every time and the next minute would never arrive.
+        lg[-1] = [lg[-1][0], util]
+    return lg[-LONG_MAX:]
+
+
 def project(cur):
     """Work out burn / projected / pace / hit_mins for a reading, in place. Returns it."""
     util = cur.get("session_util")
@@ -345,10 +434,12 @@ def _num(d, key):
         return 0.0
 
 
-def refresh(force=False, active=None):
+def refresh(force=False, active=None, tok_total=None):
     """Fetch no more often than the cadence deserves, and publish for the overlays to draw.
 
-    `active` says whether a chat is mid-turn; see poll_interval. Returns the current values."""
+    `active` says whether a chat is mid-turn; see poll_interval. `tok_total` is the running count of
+    weighted tokens from hal_tokens, passed in rather than imported so this module keeps depending on
+    nothing but hal_common. Returns the current values."""
     cur = read()
     now = time.time() * 1000
     wait = poll_interval(cur, active)                  # from the cache: all we know before fetching
@@ -384,6 +475,14 @@ def refresh(force=False, active=None):
     got["history"] = (_keep(prior, [got["ts"], util], got.get("session_resets"),
                             cur.get("session_resets"))
                       if util is not None else prior)
+    rolled_w = bool(got.get("session_resets") and cur.get("session_resets")
+                    and not same_window(got["session_resets"], cur["session_resets"]))
+    for k in ("cal", "cal_from_util", "cal_from_tok", "per_pt", "anchor_util", "anchor_tok"):
+        if k in cur:
+            got[k] = cur[k]                            # fetch() builds a fresh dict; carry these over
+    _calibrate(got, util, tok_total, rolled_w)
+    got["anchor_util"], got["anchor_tok"] = util, tok_total
+    got["long"] = _keep_long(cur, got["ts"], util, rolled_w)
     project(got)
     # The latch has to be carried across here by hand, and this is the only correct place for it.
     # `got` is a fresh dict from fetch(); everything else in the old cache is discarded on every

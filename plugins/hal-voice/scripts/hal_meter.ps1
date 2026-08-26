@@ -70,6 +70,9 @@ $script:lastFrame = 0
 # What the readout currently occupies, in canvas coords - set by the render, read by Over-Bar.
 $script:hitL = 0; $script:hitR = 0
 $script:inferred = $false  # the window rolled over while we could not ask: worked out, not read
+$script:liveUtil = -1.0    # the reading carried forward with locally measured spend
+$script:byChat = @()       # which chats are spending it: @(@(sid8, weightedPerMin), ...)
+$script:long = @()         # the whole window's readings, for the panel's chart
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -84,6 +87,7 @@ $form.Left   = $screen.Right - $UW - $DOCK_LANE - $GLOW - $TIP_W   # right edge 
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
 $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.json"
 $tokensFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "tokens.json"
+$badgesDir  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "badges"
 $dockBottom = $screen.Bottom - 44                  # above VS Code's status bar
 $GAPB = 8
 $script:curTop    = $dockBottom - $CONTENT_H - $GLOW
@@ -240,7 +244,11 @@ $render = {
         $barL = $barR - $UW
         $sBarY = $GLOW + $UPCT_H + 2
         $wBarY = $sBarY + $SBAR_H + $GAP_BARS
-        $sp = [Math]::Min(100, $script:sessionPct)
+        # The bar fills from the carried-forward value, so it creeps as you work rather than
+        # jumping a whole point a minute; the number beside it is that same value, rounded.
+        $live = if ($script:liveUtil -ge 0) { $script:liveUtil } else { [double]$script:sessionPct }
+        $sp = [int][Math]::Floor($live + 0.5)
+        if ($sp -gt 100) { $sp = 100 }
         $wp = if ($script:weeklyPct -ge 0) { [Math]::Min(100, $script:weeklyPct) } else { -1 }
 
         $trk = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(215, 38, 38, 42))
@@ -248,7 +256,7 @@ $render = {
         if ($wp -ge 0) { $g.FillRectangle($trk, $barL, $wBarY, $UW, $WBAR_H) }
         $trk.Dispose()
 
-        $sw = [int]($UW * $sp / 100.0)
+        $sw = [int]($UW * $live / 100.0)
         if ($sw -gt 0) {
             # Pace when we have enough readings to fit a rate to; the plain how-full thresholds for
             # the first few minutes after a cold start, when a made-up rate would be worse than none.
@@ -310,7 +318,7 @@ $render = {
 # Narrow and tall rather than wide and short. The three rate figures used to sit in three columns,
 # which is what forced the width; as label-left / value-right rows they read at least as well and
 # let the whole thing come in by nearly a hundred pixels.
-$PANEL_W = 264; $PANEL_H = 302; $PGLOW = 14; $PAD = 14; $COL = 236
+$PANEL_W = 264; $PANEL_H = 400; $PGLOW = 14; $PAD = 14; $COL = 236
 $PSPARK_W = 236; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
 $fHero  = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
 $fBig   = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
@@ -347,6 +355,29 @@ function PaceWords($p, $proj, $hit) {
     if ($p -ge 0.42) { return "Right on the line - set to use just about all of it." }
     if ($proj -ge 0) { return "Coasting - on pace for $proj% by reset." }
     return "Coasting."
+}
+
+$script:chatMeta = @{}
+$script:chatMetaAt = 0
+function Chat-Meta($sid) {
+    # A chat's name and accent come from the same state file its tab draws from, so the panel and
+    # the dock can never disagree about which colour is which chat. Cached for a few seconds: the
+    # panel repaints whenever a value moves, and this is a file read per chat.
+    $now = NowMs
+    if (($now - $script:chatMetaAt) -gt 4000) { $script:chatMeta = @{}; $script:chatMetaAt = $now }
+    if ($script:chatMeta.ContainsKey($sid)) { return $script:chatMeta[$sid] }
+    $m = @{ label = $sid; color = [System.Drawing.Color]::FromArgb(150,150,158) }
+    try {
+        $st = Read-JsonFile (Join-Path $badgesDir "$sid.json")
+        if ($st) {
+            if ($st.label) { $m.label = [string]$st.label }
+            if ($st.color -and $st.color.Count -ge 3) {
+                $m.color = [System.Drawing.Color]::FromArgb([int]$st.color[0], [int]$st.color[1], [int]$st.color[2])
+            }
+        }
+    } catch { }
+    $script:chatMeta[$sid] = $m
+    return $m
 }
 
 function Fmt-Count($n) {
@@ -471,16 +502,54 @@ $renderPanel = {
         $ry += 20
     }
 
-    # the last twenty minutes, big enough to read
-    TxtL "LAST 20 MIN" $fEye $DIM $L 236
-    $h = @($script:hist)
+    # Which chats are actually spending it. The HUD has always known both halves of this - what each
+    # tab is, and what the window costs - and never put them next to each other.
+    $rows2 = @($script:byChat)
+    if ($rows2.Count -gt 0) {
+        TxtL "SPENDING IT" $fEye $DIM $L 240
+        $topRate = [double]$rows2[0][1]
+        $yy = 258
+        foreach ($row in $rows2) {
+            $sid = [string]$row[0]; $rate = [double]$row[1]
+            $meta = Chat-Meta $sid
+            $dot = New-Object System.Drawing.SolidBrush $meta.color
+            $g.FillEllipse($dot, [float]$L, [float]($oy + $yy - 7), 6, 6); $dot.Dispose()
+            $nm = [string]$meta.label
+            while ($nm.Length -gt 1 -and
+                   [int][Math]::Ceiling($g.MeasureString($nm, $fBody).Width) -gt ($COL - 100)) {
+                $nm = $nm.Substring(0, $nm.Length - 1)
+            }
+            TxtL $nm $fBody $INK ($L + 12) ($yy - 8)
+            TxtR ((Fmt-Count ([int]$rate)) + " /min") $fMicro $DIMMER $R ($yy - 7)
+            # A bar apiece, relative to the greediest, so the split reads at a glance.
+            if ($topRate -gt 0) {
+                $bw = [int]($COL * $rate / $topRate)
+                if ($bw -lt 2) { $bw = 2 }
+                $sb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(90, $meta.color.R, $meta.color.G, $meta.color.B))
+                $g.FillRectangle($sb, $L, ($oy + $yy + 2), $bw, 2); $sb.Dispose()
+            }
+            $yy += 21
+        }
+    } else { $yy = 234 }
+
+    # The whole window, not the twenty minutes the burn fit happens to need - that span was never a
+    # display decision. Falls back to the fit's own samples before the first minute has elapsed.
+    $h = @($script:long)
+    if ($h.Count -lt $SPARK_MIN) { $h = @($script:hist) }
+    $span = ""
+    if ($h.Count -ge 2) {
+        try { $span = MinsLong ([int](([double]$h[$h.Count-1][0] - [double]$h[0][0]) / 60000.0)) } catch { }
+    }
+    $chartLbl = if ($span) { "LAST $span" } else { "THIS SESSION" }
+    $chartY = $yy + 14
+    TxtL $chartLbl $fEye $DIM $L $chartY
     if ($h.Count -ge $SPARK_MIN) {
         $lo = 1000.0; $hi = -1.0
         foreach ($p in $h) { $v = [double]$p[1]; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
-        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R 236
-        Draw-Spark2 $g $h $L ($oy + 250) $PSPARK_W $PSPARK_H $accent
+        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R $chartY
+        Draw-Spark2 $g $h $L ($oy + $chartY + 14) $PSPARK_W $PSPARK_H $accent
     } else {
-        TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) 236
+        TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) $chartY
     }
 
     $g.Dispose()
@@ -640,13 +709,39 @@ $timer.Add_Tick({
         $script:hist = $hs
         # Tokens come from the transcripts on their own, much faster clock, so they are their own
         # file and their own staleness - a frozen OAuth reading does not make them wrong.
-        $tp = -1; $op = -1
+        $tp = -1; $op = -1; $tot = $null; $bc = @()
         $tj = Read-JsonFile $tokensFile
         if ($tj) {
-            try { if (($nowMs - [int64]$tj.ts) -lt 60000) { $tp = [int]$tj.tpm; $op = [int]$tj.opm } } catch {}
+            try {
+                if (($nowMs - [int64]$tj.ts) -lt 60000) {
+                    $tp = [int]$tj.tpm; $op = [int]$tj.opm; $tot = [double]$tj.total
+                    if ($null -ne $tj.by_chat) { $bc = @($tj.by_chat) }
+                }
+            } catch {}
         }
-        if ($tp -ne $script:tpm -or $op -ne $script:opm) {
-            $script:tpm = $tp; $script:opm = $op
+        # The endpoint answers in whole points every 45s at best. Between answers we know exactly
+        # what has been spent locally, so carry the last real reading forward with it - and snap
+        # back to the truth the moment a fetch lands. Falls back to the plain reading when there is
+        # no calibration yet, rather than to a guess.
+        $lu = -1.0
+        if ($null -ne $tot -and $j) {
+            try {
+                $per = 320000.0                      # hal_usage.PER_PT_DEFAULT, until it has fitted one
+                try { if ($null -ne $j.per_pt -and [double]$j.per_pt -gt 0) { $per = [double]$j.per_pt } } catch {}
+                $au = [double]$j.anchor_util; $at = [double]$j.anchor_tok
+                if ($per -gt 0) {
+                    $extra = ($tot - $at) / $per
+                    if ($extra -lt 0) { $extra = 0.0 }
+                    $lu = [Math]::Max(0.0, [Math]::Min(100.0, $au + $extra))
+                }
+            } catch { $lu = -1.0 }
+        }
+        $lg = @()
+        try { if ($j -and $null -ne $j.long) { $lg = @($j.long) } } catch { $lg = @() }
+        $script:byChat = $bc; $script:long = $lg
+        if ($tp -ne $script:tpm -or $op -ne $script:opm -or
+            [Math]::Abs($lu - $script:liveUtil) -ge 0.05) {
+            $script:tpm = $tp; $script:opm = $op; $script:liveUtil = $lu
             if ($script:panelOpen) { try { & $renderPanel } catch {} }
         }
         $left = if ($st) { "" } else { ResetShort $sr }     # a stale reading has no honest countdown

@@ -201,6 +201,31 @@ offset is remembered, only new bytes are parsed, a record still being written is
 and a file that has shrunk is treated as a new file rather than a rewind. Steady-state cost is about
 35ms every five seconds, in the daemon, off your editor's thread.
 
+### The reading between readings
+
+The endpoint answers in whole percentage points, every 45 seconds at best — so between answers the
+number is frozen, and a burn rate fitted to it needs five minutes of samples before it says anything.
+Tokens are measured here continuously, so the displayed reading is **the last real one plus what
+you've spent since**, and every fetch snaps it back to the truth.
+
+The conversion is fitted, never assumed: consecutive readings give (points moved, tokens spent)
+pairs, averaged over the last eight. Pairs are only trusted across a gap of four points or more —
+at half a point of rounding on each end, a one-point gap is 50% error — and never across a window
+rollover, where utilization falls off a cliff. A pair wildly out of line with the others is refused,
+so one bad reading can't drag the fit somewhere it takes hours to climb out of.
+
+Until it has fitted one it uses a documented default. Being roughly wrong there costs almost
+nothing: the extrapolation only ever spans one poll interval, so even a rate that's twice off
+mis-states the reading by a fraction of a point before the next fetch corrects it.
+
+### Which chat is spending it
+
+The panel lists the chats burning the window, biggest first, each in its own tab colour with a bar
+relative to the greediest. Sub-agent spend bills to the chat that started it — that spend lives in a
+separate file tree and on a busy chat it's the larger half, so leaving it out would undercount the
+chats doing the most. It's the one thing the HUD always knew separately about tabs and about usage
+and never put next to each other.
+
 ### When it can't reach the endpoint
 
 The token Claude Code stores expires, and it's renewed by *using* Claude — so a machine left overnight
@@ -251,7 +276,7 @@ genuinely quieter rate (not just wobble back over the line) before it can fire a
 rolling over re-arms it silently, because a fresh budget isn't news. The card belongs to no chat, so
 clicking it just dismisses — and it says so. `usage_alert: false` turns it off.
 
-Hovering shows a **sparkline** of those readings next to the projection, so "on pace for 46%" comes
+The panel shows a **sparkline** of the whole window — not the twenty minutes the burn fit happens to need, which was never a display decision, so "on pace for 46%" comes
 with the shape it was worked out from — a steady climb, a burst that's tailing off, or a flat line
 that just ticked up. It spans the samples' own range rather than 0–100, because twenty quiet minutes
 cover about two points and would otherwise be an invisible line along the bottom; but it never zooms

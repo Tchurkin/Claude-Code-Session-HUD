@@ -588,5 +588,97 @@ print("backoff: auth caps at %ds, rate limits at %ds" % (hu.AUTH_MAX_MS / 1000, 
 hu.CACHE, hu.fetch = _sv
 shutil.rmtree(tmp2, ignore_errors=True)
 
+# -- 12. carrying the reading forward between fetches ----------------------------------------------
+# The endpoint answers in whole points, every 45s at best, so between answers the number is frozen.
+# Tokens are measured here continuously, so the reading between fetches is the last real one plus
+# what has been spent since - and every fetch snaps it back. The conversion is never hardcoded: it
+# is fitted from consecutive readings so it follows the plan rather than assuming one.
+cal = {}
+hu._calibrate(cal, 10.0, 1_000_000.0, False)
+check(cal.get("per_pt") is None, "one reading is not a pair, so nothing is claimed yet")
+
+hu._calibrate(cal, 12.0, 1_600_000.0, False)
+check(cal.get("per_pt") is None,
+      "nor is a 2-point gap - at half a point of rounding on each end that is 50%% error")
+
+hu._calibrate(cal, 20.0, 4_000_000.0, False)     # 10 points, 3,000,000 tokens
+check(abs(cal["per_pt"] - 300000) < 1, "a wide enough gap gives the rate (got %r)" % cal["per_pt"])
+
+# A second pair averages in rather than replacing.
+hu._calibrate(cal, 30.0, 7_200_000.0, False)     # another 10 points, 3,200,000
+check(abs(cal["per_pt"] - 310000) < 1, "pairs average (got %r)" % cal["per_pt"])
+check(len(cal["cal"]) == 2, "and both are kept (got %d)" % len(cal["cal"]))
+
+# A wild pair is refused. A daemon restart that re-tails a transcript, or a machine that slept
+# through half a window, would otherwise drag the fit somewhere it takes hours to climb out of.
+before = cal["per_pt"]
+hu._calibrate(cal, 40.0, 107_200_000.0, False)   # 10 points, 100 MILLION tokens
+check(cal["per_pt"] == before, "an absurd pair is ignored (%r -> %r)" % (before, cal["per_pt"]))
+check(len(cal["cal"]) == 2, "and not remembered")
+check(cal["cal_from_util"] == 40.0, "but the fit still moves on from it, or it blocks every later pair")
+
+# A rollover is not a pair. Usually utilization falls off a cliff there, which the "went backwards"
+# guard would catch anyway - so the case that actually needs the rollover flag is a light window
+# followed by a busy one, where the new reading is HIGHER than the point we were measuring from and
+# nothing about the numbers looks wrong.
+rolled = dict(cal)
+rolled["cal_from_util"], rolled["cal_from_tok"] = 2.0, 1_000_000.0
+# 28 points and 8.68M tokens: a perfectly ordinary-looking ratio, so the outlier guard has no reason
+# to object. Only knowing that the window rolled can reject it, which is the point of the flag.
+hu._calibrate(rolled, 30.0, 1_000_000.0 + 8_680_000.0, True)
+check(len(rolled["cal"]) == 2, "a rollover adds no pair even when the reading went UP across it")
+check(rolled["cal_from_util"] == 30.0, "and re-anchors on the new window")
+low = dict(cal)
+hu._calibrate(low, 2.0, 120_000_000.0, True)
+check(len(low["cal"]) == 2, "and the ordinary cliff-shaped rollover adds none either")
+
+# Now the extrapolation itself.
+anch = {"per_pt": 300000.0, "anchor_util": 20.0, "anchor_tok": 4_000_000.0}
+check(hu.live_util(anch, 4_000_000.0) == 20.0, "at the anchor, it is the anchor")
+check(abs(hu.live_util(anch, 4_600_000.0) - 22.0) < 1e-9,
+      "600k tokens later it is two points on (got %r)" % hu.live_util(anch, 4_600_000.0))
+check(hu.live_util(anch, 3_000_000.0) == 20.0,
+      "a counter that went backwards is a restart, not a refund - never below the anchor")
+check(hu.live_util(anch, 999_000_000.0) == 100.0, "and it cannot run past the limit")
+check(hu.live_util(anch, None) is None, "no token figure, no claim")
+# Before the window has moved far enough to fit a rate, a documented default is used rather than
+# nothing - the reading is live from the first minute. Safe because the extrapolation only ever
+# spans one poll interval, so being off by a factor of two costs a fraction of a point.
+seeded = hu.live_util({"anchor_util": 20.0, "anchor_tok": 0.0}, hu.PER_PT_DEFAULT)
+check(abs(seeded - 21.0) < 1e-9, "an uncalibrated reading still moves, on the default (got %r)" % seeded)
+check(hu.live_util({"per_pt": 100000.0, "anchor_util": 20.0, "anchor_tok": 0.0}, 100000.0) == 21.0,
+      "and a fitted rate overrides the default")
+check(hu.live_util({"per_pt": 0, "anchor_util": 1, "anchor_tok": 0}, 5.0) is not None,
+      "a stored zero means no fit yet, which is the default's job, not a refusal")
+# A negative rate would otherwise run the extrapolation backwards, get clamped to zero, and quietly
+# report the anchor as though it were current - refusing is the honest answer.
+check(hu.live_util({"per_pt": -5.0, "anchor_util": 20.0, "anchor_tok": 0.0}, 1000.0) is None,
+      "as is a negative one")
+print("live reading: fitted at %s tokens/point, carried forward, snapped back by every fetch"
+      % "{:,.0f}".format(cal["per_pt"]))
+
+
+# -- 13. a history for the eye, not for the fit ------------------------------------------------------
+# The burn fit needs twenty minutes; the panel wants the whole window. That span was never a display
+# decision, so the drawing gets its own coarser series rather than being limited by the arithmetic.
+lg = []
+base = 1_700_000_000_000
+cur13 = {}
+for i in range(0, 10):
+    cur13["long"] = hu._keep_long(cur13, base + i * 20000, 5.0 + i, False)   # every 20s
+check(len(cur13["long"]) == 4,
+      "ten readings twenty seconds apart keep one a minute, not ten (got %d)" % len(cur13["long"]))
+check(cur13["long"][-1][1] == 14.0, "and the newest value wins inside the minute")
+
+cur13["long"] = hu._keep_long(cur13, base + 10 * 20000, 3.0, True)
+check(len(cur13["long"]) == 1, "a rollover starts the drawing over too (got %d)" % len(cur13["long"]))
+
+big = {"long": [[base + i * 60000, float(i % 100)] for i in range(hu.LONG_MAX + 50)]}
+big["long"] = hu._keep_long(big, base + 99999 * 60000, 7.0, False)
+check(len(big["long"]) == hu.LONG_MAX, "and it is capped (got %d)" % len(big["long"]))
+check(hu.LONG_MAX * hu.LONG_EVERY_MS >= 5 * 60 * 60 * 1000,
+      "with room for a whole five-hour window (%d samples of %ds)" % (hu.LONG_MAX, hu.LONG_EVERY_MS / 1000))
+print("long history: one a minute, %d samples, cleared with the window" % hu.LONG_MAX)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - pace maths, backoff and the shipped colour ramp all hold")

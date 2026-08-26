@@ -164,4 +164,57 @@ ht.PROJECTS_DIR, ht.CACHE = _saved
 shutil.rmtree(tmp, ignore_errors=True)
 print("end to end: 6 records on disk -> 4 calls counted, subagents included, tail resumed")
 
+# -- 6. which chat is spending it ------------------------------------------------------------------
+# A chat's own transcript is <slug>/<sessionId>.jsonl; anything its sub-agents ran lives under
+# <slug>/<sessionId>/subagents/... So a sub-agent's spend bills to the chat that started it rather
+# than floating free - which matters, because on a busy chat the subagent tree is the larger half.
+check(ht._sid_of("/p/proj/6650e016-dee6-41ce.jsonl") == "6650e016", "a transcript names its chat")
+check(ht._sid_of("/p/proj/6650e016-dee6/subagents/wf_1/agent-abc.jsonl") == "6650e016",
+      "and so does anything its sub-agents ran")
+check(ht._sid_of(r"C:\p\proj\6650e016-x\subagents\a\b.jsonl") == "6650e016",
+      "on Windows separators too")
+check(ht._sid_of("") == "?", "and an unparseable path is not silently attributed to someone")
+
+now6 = int(time.time() * 1000)
+samples = [[now6 - 60000, 100.0, 10, 50, "aaaa1111"],
+           [now6 - 30000, 500.0, 30, 90, "bbbb2222"],
+           [now6 - 10000, 200.0, 20, 60, "aaaa1111"],
+           [now6 - 99 * MIN, 9999.0, 1, 1, "cccc3333"]]
+rows = ht.by_chat(samples, now6)
+check([r[0] for r in rows] == ["bbbb2222", "aaaa1111"],
+      "biggest spender first, and the stale one is gone (got %r)" % rows)
+mins = ht.WINDOW_MS / 60000.0
+check(abs(rows[0][1] - 500 / mins) < 1, "rates are per minute over the window (got %r)" % rows[0][1])
+check(abs(rows[1][1] - 300 / mins) < 1,
+      "and a chat's separate calls are summed into one row (got %r)" % rows[1][1])
+check(len(ht.by_chat(samples, now6, top=1)) == 1, "the list is capped for the panel")
+check(ht.by_chat([[now6, 0.4, 0, 0, "x"]], now6) == [],
+      "and a chat spending essentially nothing is not listed")
+print("attribution: sub-agents bill to their parent chat, biggest first")
+
+
+# -- 7. the running total is spend, not history ------------------------------------------------------
+# A cold start tails up to four megabytes of existing transcript. Every one of those records is
+# history, and counting them would inject a phantom of millions of tokens with no matching movement
+# in the plan's own figure - which is exactly the pair that would ruin the calibration that reads it.
+tmp7 = tempfile.mkdtemp(prefix="hud-tok7-")
+_sv7 = (ht.PROJECTS_DIR, ht.CACHE)
+ht.PROJECTS_DIR = os.path.join(tmp7, "projects")
+ht.CACHE = os.path.join(tmp7, "tokens.json")
+os.makedirs(os.path.join(ht.PROJECTS_DIR, "proj"))
+old_ms = now6 - 90 * MIN
+with open(os.path.join(ht.PROJECTS_DIR, "proj", "s.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write(_rec("old-1", 100000, old_ms) + "\n")      # an hour and a half ago
+    fh.write(_rec("new-1", 100, now6 - 60000) + "\n")   # a minute ago
+
+u7 = ht.refresh(force=True)
+check(u7["n"] == 1, "the ancient record is not in the window (got %d samples)" % u7["n"])
+check(abs(u7["total"] - 500.0) < 1e-6,
+      "and only the recent one counts toward the total (got %r, not the 500,000 the old one weighs)"
+      % u7["total"])
+ht.PROJECTS_DIR, ht.CACHE = _sv7
+shutil.rmtree(tmp7, ignore_errors=True)
+print("total: %s from a cold start over an hour of history - spend, not archaeology" % u7["total"])
+
+
 print("\nOK - tokens are weighed the way the plan charges, counted once, and read once")
