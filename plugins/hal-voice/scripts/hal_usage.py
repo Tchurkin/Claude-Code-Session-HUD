@@ -26,8 +26,17 @@ CLAUDE_DIR  = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(hc.HOME, ".cla
 CREDENTIALS = os.path.join(CLAUDE_DIR, ".credentials.json")
 CACHE       = os.path.join(hc.DATA_DIR, "usage.json")
 ENDPOINT    = "https://api.anthropic.com/api/oauth/usage"
-POLL_MS     = 60000          # the numbers move slowly; one request a minute is plenty
+POLL_MS     = 60000          # base for the failure backoff, and the cadence when in any doubt
 FAIL_MAX_MS = 600000         # ... and when one fails, back off rather than hammering
+
+# How often to ask, by whether anything is actually being spent. A fixed cadence spends the same
+# request budget on a frozen number as on a moving one, and this endpoint rate-limits: a day of three
+# busy hours and twenty-one idle ones goes from 1440 requests to about 800, while the hours that
+# actually move the number get watched more closely rather than less.
+POLL_FAST_MS = 45000         # a chat is mid-turn: the number is moving
+POLL_WARM_MS = 60000         # unknown, or no rate yet - today's cadence, the safe default
+POLL_SLOW_MS = 240000        # chats open, nothing running: still six samples inside RATE_WINDOW_MS
+MOVE_EPS     = 0.05          # a rise smaller than this is float noise, not spending
 
 # Fitting the burn rate. Twenty minutes is long enough to ride out the coarseness of a percentage
 # that only moves in whole points, and short enough that putting the laptop down shows up in the
@@ -167,6 +176,43 @@ def burn_rate(hist):
     return max(0.0, sum((t - mt) * (u - mu) for t, u in pts) / den)
 
 
+def _moving(hist):
+    """Did the reading actually rise between the last two samples?
+
+    A second opinion on "is anything being spent", independent of the caller's. The fitted burn rate
+    is no good for this: it lags minutes on the way up and keeps a decaying tail for a full twenty
+    minutes on the way down, so it would hold the fast cadence long after you stopped."""
+    if len(hist) < 2:
+        return False
+    try:
+        return float(hist[-1][1]) - float(hist[-2][1]) > MOVE_EPS
+    except Exception:
+        return False
+
+
+def poll_interval(cur, active=None):
+    """How long to wait before asking again. Only relaxes when told nothing is running AND a rate
+    already exists to protect.
+
+    `active` is the caller's read on whether a chat is mid-turn - instantaneous and free, where the
+    burn rate is neither. None means the caller could not tell, which is a reason to hold the normal
+    cadence, not to relax.
+
+    The cold-start branch is the important one. burn_rate needs samples spanning five minutes, so how
+    soon a rate first exists is bound by that span, not by the sample count: at 60s it converges in
+    five minutes, at 240s it would need twelve and be one dropped poll from never converging at all.
+    So a missing rate is never a reason to slow down. It also self-heals after a window rollover,
+    when _keep wipes the history and burn goes back to None: the cadence snaps to 60s, a rate exists
+    again a few polls later, and it relaxes on its own."""
+    if active or _moving(cur.get("history") or []):
+        return POLL_FAST_MS
+    if cur.get("burn") is None:
+        return POLL_WARM_MS
+    if active is False:
+        return POLL_SLOW_MS
+    return POLL_WARM_MS
+
+
 def pace(util, rate, mins_left):
     """Where this window is heading, as 0..1: 0 = coasting, 0.5 = lands exactly on the limit, 1 = out.
 
@@ -250,12 +296,15 @@ def _num(d, key):
         return 0.0
 
 
-def refresh(force=False):
-    """Fetch at most once a minute and publish for the overlays to draw. Returns the current values."""
+def refresh(force=False, active=None):
+    """Fetch no more often than the cadence deserves, and publish for the overlays to draw.
+
+    `active` says whether a chat is mid-turn; see poll_interval. Returns the current values."""
     cur = read()
     now = time.time() * 1000
+    wait = poll_interval(cur, active)                  # from the cache: all we know before fetching
     if not force:
-        if now - _num(cur, "ts") < POLL_MS:
+        if now - _num(cur, "ts") < wait:
             return cur
         if now < _num(cur, "next_try"):
             return cur                                 # a recent fetch failed; let the backoff run
@@ -265,9 +314,13 @@ def refresh(force=False):
         # endpoint (an expired token, a 429) would otherwise get hit that often. `ts` is deliberately
         # left alone so the meter can still tell the reading has gone stale; the backoff has its own
         # field, and doubles up to FAIL_MAX_MS.
+        # max(), so the two rules compose without fighting: a 429 always outranks being busy, and a
+        # failure while idle never retries sooner than we would have polled anyway. The backoff base
+        # stays POLL_MS whatever the activity - rebasing it on the fast tier would make the first
+        # retry after a 429 come twice as fast, in exactly the case the endpoint asked us to stop.
         n = int(_num(cur, "fail_n")) + 1
         cur["fail_n"] = n
-        cur["next_try"] = now + min(FAIL_MAX_MS, POLL_MS * (2 ** min(n - 1, 6)))
+        cur["next_try"] = now + max(wait, min(FAIL_MAX_MS, POLL_MS * (2 ** min(n - 1, 6))))
         _publish(cur)
         return cur                                     # keep showing the last good numbers
     util = got.get("session_util")

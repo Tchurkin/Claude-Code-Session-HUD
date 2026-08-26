@@ -36,6 +36,7 @@ LABEL_GAP_MS  = 6000      # spacing between background name lookups (they cost a
 LABEL_RETRY_MS = 300000   # don't re-attempt a name that just failed for 5 min
 TITLE_EVERY   = 60000     # how often to re-read a chat's own title (used to find its window)
 WINDOW_STALE_MS = 60000   # a window's self-report is dead if it hasn't heartbeated within this
+WORKING_FRESH_MS = 90000  # a chat still counts as mid-turn if its state was touched this recently
 WINDOWS_DIR   = os.path.join(hc.DATA_DIR, "windows")   # written by the companion VS Code extension
 ALIVE_FILE    = os.path.join(hb.BADGE_DIR, "sessions_daemon.alive")
 EXE_FILE      = os.path.join(hb.BADGE_DIR, "sessions_daemon.exe")   # interpreter, for PS-side respawn
@@ -360,16 +361,22 @@ def reconcile():
     now  = _now()
     os.makedirs(hb.BADGE_DIR, exist_ok=True)
     hb.ensure_helpers(cfg)          # the tint bar and the usage meter, if either has died
-    if cfg.get("usage_meter", True):
-        hal_usage.refresh()         # self-throttled to one request a minute
     binds = _bind_windows(live)
     shows = _branch_shows(live)
     seen  = set()
+    busy  = False                   # is any chat mid-turn? decides how often to ask about usage
 
     for s in live:
         sid = s["sid"]
         seen.add(hb._sid8(sid))
         st   = hb._read_state(sid)
+        # The freshness check is load-bearing: a chat killed mid-turn leaves "working" behind
+        # forever, but its ts freezes with it, so a minute and a half later it stops counting.
+        if st.get("state") == "working":
+            try:
+                busy = busy or (now - float(st.get("ts") or 0) < WORKING_FRESH_MS)
+            except Exception:
+                pass
         hwnd, showing, tabname = binds.get(sid) or (0, True, "")
         # Only write when something actually needs fixing - this runs every few seconds, forever.
         need = (not st                                                    # never had a tab
@@ -394,6 +401,9 @@ def reconcile():
             _chat_title(s)              # cache the chat's title (the pre-touch read had nowhere to go)
             hb.update_state(sid, showing=showing, tab=tabname,
                             branch_show=_branch_shows(live).get(sid, False))
+
+    if cfg.get("usage_meter", True):
+        hal_usage.refresh(active=busy)   # 45s while a chat is running, 4 min while nothing is
 
     for f in glob.glob(os.path.join(hb.BADGE_DIR, "*.json")):
         sid8 = os.path.basename(f)[:-5]

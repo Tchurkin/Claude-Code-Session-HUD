@@ -150,8 +150,12 @@ Claude Code will then refresh it at startup and prompt you to reload when there'
 ### How the usage meter gets its numbers
 
 Claude Code stores an OAuth token on your machine and its own `/usage` command reads
-`api.anthropic.com/api/oauth/usage`; `scripts/hal_usage.py` asks the same endpoint, once a minute,
-and caches the answer for the overlays to draw. It reads the token fresh each time and never
+`api.anthropic.com/api/oauth/usage`; `scripts/hal_usage.py` asks the same endpoint and caches the
+answer for the overlays to draw. It asks as often as the number is actually moving: every 45 seconds
+while a chat is mid-turn, every four minutes while chats are open but idle, and once a minute
+whenever it can't tell or hasn't got a burn rate yet. That's fewer requests than a fixed cadence
+over a day *and* better resolution during the hours that matter — which is worth caring about,
+because the endpoint rate-limits. It reads the token fresh each time and never
 refreshes, rewrites, or sends it anywhere else — when the token expires the fetch simply fails, the
 meter greys out, and it recovers on its own once Claude Code renews it in the course of being used.
 That endpoint is not a documented API and could change; if it does, the meter goes grey rather than

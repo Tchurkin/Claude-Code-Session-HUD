@@ -244,7 +244,84 @@ hu.CACHE, hu.fetch = _saved
 print("backoff: 21 daemon ticks against a dead endpoint -> 1 request, doubling wait, cleared on success")
 
 
-# -- 6. the colour ramp the meter actually ships ------------------------------------------------
+# -- 6. how often to ask -------------------------------------------------------------------------
+# A fixed cadence spends the same request budget on a frozen number as on a moving one, and this
+# endpoint rate-limits - we have seen it 429. poll_interval is pure, so most of this is a table.
+WITH_RATE = {"burn": 0.3, "history": [[T0, 10.0], [T0 + MIN, 10.0]]}
+NO_RATE = {"burn": None, "history": []}
+
+check(hu.poll_interval(WITH_RATE, True) == hu.POLL_FAST_MS, "a chat mid-turn is watched closely")
+check(hu.poll_interval(WITH_RATE, False) == hu.POLL_SLOW_MS, "nothing running relaxes")
+check(hu.poll_interval(WITH_RATE, None) == hu.POLL_WARM_MS,
+      "a caller that cannot tell holds the normal cadence rather than relaxing")
+
+# The cold-start trap: relax before a rate exists and you never accumulate enough to get one.
+check(hu.poll_interval(NO_RATE, False) == hu.POLL_WARM_MS,
+      "a missing rate is never a reason to slow down, even when idle")
+check(hu.poll_interval(NO_RATE, None) == hu.POLL_WARM_MS, "nor when the caller cannot tell")
+check(hu.poll_interval(NO_RATE, True) == hu.POLL_FAST_MS, "but real work still wins")
+
+# Second opinion, in case the activity signal is wrong: a reading that visibly rose polls fast
+# whatever the caller believes. Not derived from `burn`, which lags going up and trails going down.
+check(hu.poll_interval({"burn": 0.3, "history": [[T0, 10.0], [T0 + MIN, 11.0]]}, False)
+      == hu.POLL_FAST_MS, "a reading that just rose overrides a caller claiming nothing is running")
+check(not hu._moving([[T0, 10.0], [T0 + MIN, 10.0]]), "a flat pair is not movement")
+check(not hu._moving([[T0, 10.0], [T0 + MIN, 10.0 + hu.MOVE_EPS / 2]]), "nor is float noise")
+check(not hu._moving([[T0, 10.0]]), "one sample cannot show movement")
+check(not hu._moving([[T0, 1.0], "junk"]), "and malformed history does not raise")
+
+# The slow tier has to leave the burn fit something to work with. If the fit goes None the meter
+# falls back to the plain thresholds, which would paint an idle 90% window RED - the exact
+# misreading pace exists to prevent. Ceiling is RATE_WINDOW_MS / (MIN_SAMPLES - 1).
+ceiling = hu.RATE_WINDOW_MS / (hu.MIN_SAMPLES - 1)
+check(hu.POLL_SLOW_MS <= ceiling,
+      "the slow tier stays under the fit ceiling (%d vs %d ms)" % (hu.POLL_SLOW_MS, ceiling))
+kept = hu.RATE_WINDOW_MS // hu.POLL_SLOW_MS + 1
+check(kept >= hu.MIN_SAMPLES + 2,
+      "with margin for two dropped polls (%d samples, fit needs %d)" % (kept, hu.MIN_SAMPLES))
+check(hu.burn_rate([[T0 + i * hu.POLL_SLOW_MS, 10.0 + 0.1 * i] for i in range(kept)]) is not None,
+      "and a rate really does fit samples spaced that far apart")
+check(hu.POLL_SLOW_MS * 3 < 900000,
+      "a reading taken at the slow cadence never looks stale to the meter (greys at 15 min)")
+
+# Cadence and backoff compose as max(): a 429 outranks being busy, and a failure while idle never
+# retries sooner than we would have polled anyway.
+_c = hu.CACHE
+hu.CACHE = os.path.join(tmp, "cadence.json")
+_f = hu.fetch
+hu.fetch = lambda timeout=10: None
+hu._publish({"burn": 0.3, "history": [[T0, 10.0], [T0 + MIN, 10.0]], "fail_n": 0})
+_t = time.time() * 1000
+hu.refresh(active=False)
+waited = hu.read()["next_try"] - _t
+check(waited >= hu.POLL_SLOW_MS - 100,
+      "an idle failure waits the idle cadence, not the 60s backoff step (%d ms)" % waited)
+hu._publish({"burn": 0.3, "history": [[T0, 10.0], [T0 + MIN, 11.0]], "fail_n": 5})
+_t = time.time() * 1000
+hu.refresh(active=True)
+waited = hu.read()["next_try"] - _t
+check(waited >= 600000 - 100,
+      "and a hard-backed-off failure is not shortened by being busy (%d ms)" % waited)
+# And refresh() has to actually USE the interval rather than merely compute it - a table of tiers
+# that nothing consults would pass everything above and change nothing. Seed a reading 90 seconds
+# old: still fresh at the idle cadence, already stale at the busy one and at the old fixed minute.
+_calls = []
+hu.fetch = lambda timeout=10: _calls.append(1) or None
+_seed = {"ts": time.time() * 1000 - 90000, "burn": 0.3,
+         "history": [[T0, 10.0], [T0 + MIN, 10.0]]}
+hu._publish(dict(_seed))
+hu.refresh(active=False)
+check(len(_calls) == 0, "a 90s-old reading is still fresh at the idle cadence, so nothing goes out")
+hu._publish(dict(_seed))
+hu.refresh(active=True)
+check(len(_calls) == 1, "but stale at the busy cadence, so the same reading is refetched")
+
+hu.CACHE, hu.fetch = _c, _f
+print("cadence: fast %ds / warm %ds / slow %ds, %d samples still fit at the slow tier"
+      % (hu.POLL_FAST_MS / 1000, hu.POLL_WARM_MS / 1000, hu.POLL_SLOW_MS / 1000, kept))
+
+
+# -- 7. the colour ramp the meter actually ships ------------------------------------------------
 # Pulled straight out of hal_meter.ps1 rather than restated here: the point is to catch the ramp
 # being changed, and a copy in the test would happily keep agreeing with itself.
 METER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -299,7 +376,7 @@ check(sat(olive) < 0.55, "...and that floor is what a direct green-to-red blend 
 print("ramp: 101 steps, worst jump %d/255, worst saturation %.2f at pace %.2f"
       % (worst_jump, worst_sat, worst_at / 100.0))
 
-# -- 7. durations stay in units you can picture --------------------------------------------------
+# -- 8. durations stay in units you can picture --------------------------------------------------
 # The weekly window is routinely six days out. "150h 12m" is a number you have to divide before it
 # means anything; "6d 6h" is a length of time. Same extract-and-run approach as the ramp.
 def _ps_function(name):
