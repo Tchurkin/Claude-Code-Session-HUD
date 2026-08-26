@@ -649,6 +649,87 @@ function Stack-DragActive {
     } catch { return $false }
 }
 
+# ── the dock handle ────────────────────────────────────────────────────────────────────────────
+# Sliding the whole dock off the right edge and back. Distinct from the HUD's on/off flag: that
+# retires every overlay, this just gets them out of the way for a minute and keeps them running, so
+# a chat that needs you still has a tab to come back to.
+#
+# The hard part is that the dock is not one window - it is a tab per chat plus the meter, each its
+# own process with its own frame clock. Left to ease themselves toward a target they drift apart
+# immediately, and worse, each tab would travel a DIFFERENT distance, because a chip is only as wide
+# as its label. A narrow tab finishes while a wide one is still going. It reads as things scattering
+# rather than a panel closing.
+#
+# So nobody eases anything. The flag carries the instant the move begins, and every overlay computes
+# the same curve from the same wall clock: offset = TRAVEL * smoothstep((now - start) / DURATION).
+# Identical input, identical output, and they move as one object whatever their frame rates are.
+# The start is set a little in the FUTURE - long enough that every overlay has polled and seen it
+# before the first pixel moves, so nothing joins late and has to snap into position.
+$script:DockFlag = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "dock.stow"
+$script:DOCK_POLL_MS  = 60      # how often an overlay re-reads the flag
+$script:DOCK_LEAD_MS  = 90      # grace before the move starts, so everyone is ready
+$script:DOCK_DUR_MS   = 300
+$script:DOCK_TRAVEL   = 560     # far enough that even the widest tab clears the screen edge
+$script:dockStowed = $false
+$script:dockStart  = 0
+$script:dockChecked = 0
+
+function Dock-Refresh {
+    $now = NowMs
+    if (($now - $script:dockChecked) -lt $script:DOCK_POLL_MS) { return }
+    $script:dockChecked = $now
+    try {
+        $p = ([PerPixelLayered]::ReadText($script:DockFlag)).Trim() -split '\s+'
+        $script:dockStowed = ($p[0] -eq '1')
+        if ($p.Count -gt 1) { $script:dockStart = [int64]$p[1] }
+    } catch {
+        $script:dockStowed = $false      # no flag yet: the dock is out, and has always been out
+        $script:dockStart = 0
+    }
+}
+
+function Dock-Stowed { Dock-Refresh; return $script:dockStowed }
+
+# How far through the move we are, from elapsed milliseconds. Smoothstep rather than a spring: a
+# spring carries state, and state is the one thing these processes cannot share. It also starts and
+# stops at zero speed, so the dock eases into motion and settles rather than jerking at both ends.
+# Pure, and separated out purely so it can be tested at exact instants.
+function Dock-Curve($elapsedMs) {
+    if ($elapsedMs -le 0) { return 0.0 }
+    if ($elapsedMs -ge $script:DOCK_DUR_MS) { return 1.0 }
+    $x = $elapsedMs / [double]$script:DOCK_DUR_MS
+    return $x * $x * (3.0 - 2.0 * $x)
+}
+
+# 0 = fully out, 1 = fully stowed.
+function Dock-Phase {
+    Dock-Refresh
+    $k = Dock-Curve ((NowMs) - $script:dockStart)
+    if ($script:dockStowed) { return $k }
+    return 1.0 - $k
+}
+
+# How far right everything is, in pixels. Every element adds this to wherever it would otherwise be,
+# so they all travel the same distance at the same moment - which is what makes it read as one panel
+# rather than as a handful of tabs leaving separately.
+function Dock-Offset { return $script:DOCK_TRAVEL * (Dock-Phase) }
+
+function Dock-Moving {
+    Dock-Refresh
+    $t = (NowMs) - $script:dockStart
+    return ($t -gt (-$script:DOCK_LEAD_MS - 40) -and $t -lt ($script:DOCK_DUR_MS + 40))
+}
+
+function Set-DockStowed($v) {
+    $start = (NowMs) + $script:DOCK_LEAD_MS
+    $flag = 0; if ($v) { $flag = 1 }
+    try {
+        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:DockFlag))
+        [PerPixelLayered]::AtomicWrite($script:DockFlag, ("{0} {1}" -f $flag, $start))
+    } catch { }
+    $script:dockChecked = 0        # so this process sees it on its very next frame too
+}
+
 function Hud-ConfigNum($name, $default) {
     try {
         $mt = [System.IO.File]::GetLastWriteTimeUtc($script:HalCfgPath)

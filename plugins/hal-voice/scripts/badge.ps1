@@ -111,6 +111,7 @@ $script:curTop  = $script:bottomAnchor - $script:CH
 $script:target  = $script:curTop
 $script:lastTop = -99999
 $script:chipX   = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }  # drawer pos
+$script:drawX   = $script:chipX     # drawer position PLUS the shared dock offset
 $script:tick = 0
 $script:closeReq = $false
 $script:hover = $false
@@ -135,7 +136,11 @@ $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.Width  = $FORM_W
 $form.Height = $FORM_H
-$form.Left   = $screen.Right - $FORM_W + $GLOW - 16   # fixed canvas; the chip is right-aligned inside it
+# 30, not 16: the dock keeps a lane at the right edge for the stow handle. A badge's glow reaches
+# 12px past its chip and glow is not transparent, so a narrower lane would have the tabs quietly
+# swallowing clicks meant for the handle - a layered window is hit-tested on alpha, not on ink.
+$DOCK_LANE = 30
+$form.Left   = $screen.Right - $FORM_W + $GLOW - $DOCK_LANE   # canvas fixed; chip right-aligned in it
 $form.Top    = [int]$script:curTop
 
 function CA($a,$c){ [System.Drawing.Color]::FromArgb([int]$a, $c.R, $c.G, $c.B) }
@@ -220,7 +225,7 @@ $render = {
     $winAlpha = if ($lit) { 255 } else { 240 }
     # The chip's left edge inside the canvas; eases right (into the drawer) when stowed, so only
     # its colored edge shows. Content past the canvas edge is clipped, leaving just that sliver.
-    $cx = [int]$script:chipX
+    $cx = [int]$script:drawX          # drawer position plus the shared dock offset
     $bmp = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -516,13 +521,21 @@ $timer.Add_Tick({
     }
 
     # horizontal: ease the chip toward its drawer position (out = fully shown, stowed = only the edge)
+    # Two independent horizontal movements, and they must not be confused. The DRAWER (right-click
+    # stow of one tab) is this tab's own business and keeps its own spring. The DOCK slide is shared:
+    # every tab and the meter add the same offset at the same instant, so the whole thing leaves as
+    # one panel. Easing that locally is what made them scatter - each tab travels a different
+    # distance, because a chip is only as wide as its label, so the narrow ones arrived first.
     $tgtX = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }
     $dx = $tgtX - $script:chipX
     if ([Math]::Abs($dx) -lt 0.5) { if ($script:chipX -ne $tgtX) { $script:chipX = $tgtX; $needRender = $true } }
     else { $script:chipX += $dx * (1 - [Math]::Pow(1 - 0.25, $dt / 30.0)); $needRender = $true }
+    # Where the chip is actually drawn: its drawer position plus wherever the dock currently is.
+    $newDraw = $script:chipX + (Dock-Offset)
+    if ([Math]::Abs($newDraw - $script:drawX) -ge 0.5) { $script:drawX = $newDraw; $needRender = $true }
 
     # Hover over the VISIBLE part of the tab (cursor-rect poll; MouseLeave is unreliable here).
-    $visL = $form.Left + [int]$script:chipX
+    $visL = $form.Left + [int]$script:drawX
     $visR = $form.Left + $FORM_W - $GLOW
     $chipT = $form.Top + $GLOW
     $cp = [System.Windows.Forms.Cursor]::Position
@@ -542,7 +555,7 @@ $timer.Add_Tick({
     # Adaptive cadence. 30ms while something moves or the cursor is on us, ~11fps while a chat is
     # working (just the indicator), otherwise a slow idle poll - a tab that is simply sitting there
     # has nothing to redraw and shouldn't cost anything to keep on screen.
-    $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or
+    $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or (Dock-Moving) -or
               ([Math]::Abs($script:target - $script:curTop) -ge 0.5) -or
               ([Math]::Abs($tgtX - $script:chipX) -ge 0.5)
     # 15ms is the practical floor for a WinForms timer (the message clock ticks ~15.6ms), and

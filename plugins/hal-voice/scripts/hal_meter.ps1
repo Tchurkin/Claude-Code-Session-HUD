@@ -60,8 +60,11 @@ $script:pace = -1.0        # 0 coasting .. 0.5 lands on the limit .. 1 runs out 
 $script:projected = -1     # where the session lands at reset, at the current burn
 $script:hitMins = -1       # minutes until the limit at the current burn
 $script:burn = -1.0        # utilization points per minute
+$script:slide = 0.0        # how far the dock has slid off to the right
+$script:lastSlide = -1.0
 $script:lastUsage = 0; $script:lastStack = 0; $script:lastPresence = 0
 $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
+$script:lastFrame = 0
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -70,7 +73,8 @@ $form.StartPosition   = [System.Windows.Forms.FormStartPosition]::Manual
 $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.Width  = $FORM_W; $form.Height = $FORM_H
-$form.Left   = $screen.Right - $UW - 16 - $GLOW - $TIP_W     # right edge lines up with the tabs
+$DOCK_LANE = 30                                    # room at the edge for the stow handle
+$form.Left   = $screen.Right - $UW - $DOCK_LANE - $GLOW - $TIP_W   # right edge lines up with the tabs
 
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
 $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.json"
@@ -123,6 +127,7 @@ function StackHeight {
 # was in turn the only watcher of.
 
 function Over-Bar {
+    if ($script:slide -gt 2) { return $false }      # slid away: the handle is the only control now
     $cp = [System.Windows.Forms.Cursor]::Position
     $mx = $form.Left + $GLOW + $OX; $my = $script:lastTop + $GLOW
     return ($cp.X -ge $mx -and $cp.X -lt ($mx + $UW) -and $cp.Y -ge $my -and $cp.Y -lt ($my + $CONTENT_H))
@@ -270,7 +275,8 @@ $render = {
     $g.Clear([System.Drawing.Color]::Transparent)
 
     if ($script:sessionPct -ge 0) {
-        $barR = $GLOW + $OX + $UW
+        $sl = [int]$script:slide
+        $barR = $GLOW + $OX + $UW + $sl
         $barL = $barR - $UW
         $sBarY = $GLOW + $UPCT_H + 2
         $wBarY = $sBarY + $SBAR_H + $GAP_BARS
@@ -737,6 +743,12 @@ $timer.Add_Tick({
     }
     if ($nowMs - $script:lastDaemon -ge 3000) { $script:lastDaemon = $nowMs; Ensure-HudDaemon; Assert-Topmost $form }
 
+    # The dock slide is not ours to ease - every tab and this meter take the same number from the
+    # same shared clock, which is the only way separate processes leave the screen together.
+    $script:slide = Dock-Offset
+    if ([Math]::Abs($script:slide - $script:lastSlide) -ge 0.5) { $script:lastSlide = $script:slide; & $render }
+    if ($script:slide -gt 2 -and $script:panelOpen) { & $closePanel }
+
     $over = Over-Bar
     if ($over -ne $script:hot) { $script:hot = $over; & $render }
 
@@ -768,7 +780,9 @@ $timer.Add_Tick({
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
 
-    $want = if (([Math]::Abs($script:targetTop - $script:curTop) -ge 0.5) -or $script:hot -or $script:panelOpen) { 30 } else { 200 }
+    $want = if (Dock-Moving) { 15 }
+            elseif (([Math]::Abs($script:targetTop - $script:curTop) -ge 0.5) -or $script:hot -or $script:panelOpen) { 30 }
+            else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
     if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }
 })

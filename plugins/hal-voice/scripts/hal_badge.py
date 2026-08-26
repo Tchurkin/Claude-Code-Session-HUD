@@ -38,6 +38,7 @@ BADGE_DIR   = os.path.join(hc.DATA_DIR, "badges")
 BADGE_PS1   = os.path.join(hc.SCRIPTS_DIR, "badge.ps1")
 TINT_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_tint.ps1")
 METER_PS1   = os.path.join(hc.SCRIPTS_DIR, "hal_meter.ps1")
+DOCK_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_dock.ps1")     # the slide-away handle
 POPUP_PS1   = os.path.join(hc.SCRIPTS_DIR, "popup.ps1")
 SESSIONS_PY = os.path.join(hc.SCRIPTS_DIR, "hal_sessions.py")
 BADGE_PY    = os.path.abspath(__file__)          # for re-entering ourselves as `--beep`
@@ -807,7 +808,7 @@ def _ensure_daemon():
 
 
 def ensure_helpers(cfg=None):
-    """Keep the always-on overlays up: the window-tint accent and the "new window" button.
+    """Keep the always-on overlays up: the window tint, the usage meter, and the dock handle.
 
     These used to be revived only from ``touch``, which the reconciler skips whenever no tab needs
     fixing - so a helper that died stayed dead for as long as the HUD had nothing else to do, and the
@@ -818,6 +819,8 @@ def ensure_helpers(cfg=None):
         _ensure_singleton("window_tint", TINT_PS1)
     if cfg.get("usage_meter", True):
         _ensure_singleton("usage_meter", METER_PS1)
+    if cfg.get("dock_button", True):
+        _ensure_singleton("dock_handle", DOCK_PS1)
 
 
 def _gc_stale():
