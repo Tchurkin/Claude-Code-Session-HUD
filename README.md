@@ -28,7 +28,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 | **Per-chat badge** | A small persistent chip, bottom-right, one per chat — in that chat's **own stable color** (remembered durably, so the same chat keeps its color across despawn/respawn; it only changes to break a clash with another live chat). The tab for the window you're currently in stays lit. Sits just above VS Code's status bar so it doesn't cover the bottom-bar buttons. |
 | **A tab for every open chat** | The tab strip tracks **the chats you actually have open**, not just the ones that happened to fire a hook. Every few seconds the HUD reconciles itself against Claude Code's own registry of live sessions: a chat with no tab gets one (even if it's been sitting idle since you opened it, and even if it's the **second chat in the same window**), a tab whose window was killed comes back, and a tab whose chat has closed goes away. Tabs are never retired for being quiet — only for being **gone**. |
 | **Live state** | The badge shows **✓ done**, a **breathing dot = working**, a **pulsing ? = asking you a question**, or a **blinking ring = awaiting your input** (permission / idle). This is the "which session needs me?" signal — and a question is called out separately from a permission prompt, because only one of them is waiting on your judgement. |
-| **Audible nudge** | A chat that needs you also **chimes**: a short rising two-tone when it's asking you something or blocked on a permission, a single softer note when a background chat has finished and wants a reply. It's a `winsound` beep from the hook, so it costs no process and Focus Assist can't swallow it. `sound: false` in the config turns it off. |
+| **Audible nudge** | A chat that needs you also **chimes**: a short rising two-tone when it's asking you something or blocked on a permission, a single softer note when a background chat has finished and wants a reply, and the same rising two-tone once when your session burn tips into red (see [burn rate](#burn-rate-what-the-colour-means)). It's a `winsound` beep from the hook, so it costs no process and Focus Assist can't swallow it. `sound: false` in the config turns it off. |
 | **Branch, when it matters** | A chat's git branch is appended to its tab **only when it tells that chat apart from another one you have open** — one chat per worktree, each on its own branch, which is what the branch is there for. Several chats in the same folder on the same branch don't all get the same suffix; that's clutter, not information. `main`/`master` are never shown. |
 | **Smart name** | Each badge is labelled with the chat's **area of work** in 1–3 words (via Claude) — *College Apps*, *PCB Layout*, *Firmware Engineering* — not the task of the moment, so a tab you learn to recognize stays recognizable. Chats sharing a project folder are told each other's names and get **distinct** ones. It re-checks on every prompt but only renames when the chat has moved to a genuinely different kind of work; if Claude can't be reached it falls back to the project folder, tidied (`claude-code-hud-main` → *Claude Code HUD*). |
 | **Jump to the right chat** | Clicking a badge doesn't just raise a window — it **switches that window to the chat's tab and puts the cursor in its input**. A window holds several chats and only one is in front, so raising it alone lands you in the wrong conversation. A tab also knows *which* window its chat is in: the [companion extension](vscode-extension/) reports what each window is holding, and failing that the chat's own title is matched against what each window is displaying. So chats sharing a folder don't all jump to the same place, and one in a multi-root **Untitled (Workspace)** window (whose title never names the folder) still resolves. Only the chat a window is *currently* showing lights up as "the tab you're on". |
@@ -201,6 +201,13 @@ multiple of it and the colour is past green within about five minutes.
 Until there are enough readings to fit a rate to — four spread over five minutes — the bar falls back
 to the plain thresholds rather than inventing a trend from two samples.
 
+A colour only helps while you're looking at it, so crossing into red also **chimes once and raises
+a card** — that crossing is the one moment when easing off still changes the outcome. Once is the
+hard part: it fires on the way up and only on the way up, and the burn has to fall back to a
+genuinely quieter rate (not just wobble back over the line) before it can fire again. A window
+rolling over re-arms it silently, because a fresh budget isn't news. The card belongs to no chat, so
+clicking it just dismisses — and it says so. `usage_alert: false` turns it off.
+
 Hovering shows a **sparkline** of those readings next to the projection, so "on pace for 46%" comes
 with the shape it was worked out from — a steady climb, a burst that's tailing off, or a flat line
 that just ticked up. It spans the samples' own range rather than 0–100, because twenty quiet minutes
@@ -227,6 +234,7 @@ laptop down brings the colour back down without anything having to notice you st
 | `notify` | native desktop toast; fallback when `popup` is off or off-Windows (default true) — *cross-platform* |
 | `sound` | short chime when a chat needs you: asking, blocked, or finished in the background (default true) |
 | `usage_meter` | show how much of the 5-hour session window is used (default true) |
+| `usage_alert` | chime and raise a card the moment your burn will run the session out early (default true) |
 | `use_openai` | name tabs with OpenAI instead of Claude (default false; needs `OPENAI_API_KEY`) |
 
 ## Limitations & roadmap

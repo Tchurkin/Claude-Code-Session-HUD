@@ -48,6 +48,13 @@ MAX_SAMPLES    = 240         # backstop; the window trim is what normally bounds
 WINDOW_DROP    = 3.0         # a fall this size means a new window, not a rounding wobble
 WINDOW_TOL_S   = 120.0       # reset times this close are the same window (the API's jitters by ~1s)
 
+# Telling you once, at the moment it becomes true, that this window is going to run out early.
+# Two thresholds rather than one: against a single 0.5 boundary a pace sitting at 0.499/0.501 crosses
+# up on alternate polls and chatters at you all afternoon. It has to fall back to PACE_CLEAR - a
+# properly quieter burn, not a rounding wobble - before it can fire again.
+PACE_RED   = 0.5             # above this, the burn runs the window out before it resets
+PACE_CLEAR = 0.42            # and it has to come back below this to re-arm
+
 
 def _token():
     try:
@@ -246,6 +253,24 @@ def pace(util, rate, mins_left):
     return max(0.5, min(1.0, 0.5 + 0.5 * (1.0 - hit / mins_left)))
 
 
+def _red_edge(prev_hot, p, rolled_over):
+    """Latch for "this window is heading over the limit". Returns (hot, fired).
+
+    Fires on the way up and only on the way up, once per crossing. `p is None` is not "below the
+    threshold" - it is no claim at all, which happens for the first five minutes of every window and
+    any time the history is wiped, and treating it as a fall would re-arm the latch and fire again
+    on the way back into a state we were already in."""
+    if rolled_over:
+        return (False, False)               # new window, new budget: re-arm, and do not fire
+    if p is None:
+        return (bool(prev_hot), False)      # no rate yet: neither arm nor fire
+    if not prev_hot and p > PACE_RED:
+        return (True, True)                 # the one moment worth interrupting you for
+    if prev_hot and p < PACE_CLEAR:
+        return (False, False)               # eased off enough to be worth hearing about again
+    return (bool(prev_hot), False)
+
+
 def project(cur):
     """Work out burn / projected / pace / hit_mins for a reading, in place. Returns it."""
     util = cur.get("session_util")
@@ -331,8 +356,27 @@ def refresh(force=False, active=None):
                             cur.get("session_resets"))
                       if util is not None else prior)
     project(got)
+    # The latch has to be carried across here by hand, and this is the only correct place for it.
+    # `got` is a fresh dict from fetch(); everything else in the old cache is discarded on every
+    # successful poll, so anything written into usage.json from outside refresh() lives exactly
+    # until the next fetch. Same reason `history` is carried two lines up.
+    rolled = bool(got.get("session_resets") and cur.get("session_resets")
+                  and not same_window(got["session_resets"], cur["session_resets"]))
+    hot, fired = _red_edge(cur.get("pace_hot"), got.get("pace"), rolled)
+    got["pace_hot"] = hot
+    if fired:
+        got["pace_alert"] = got["ts"]       # unclaimed; whoever raises it calls clear_alert()
     _publish(got)
     return got
+
+
+def clear_alert():
+    """Consume a pending red-crossing alert. One-shot: the next caller sees nothing."""
+    cur = read()
+    if cur.pop("pace_alert", None) is None:
+        return False
+    _publish(cur)
+    return True
 
 
 if __name__ == "__main__":

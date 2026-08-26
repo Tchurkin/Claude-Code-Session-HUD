@@ -350,6 +350,29 @@ def _cheap_label(sess):
     return hb._proj_label(sess.get("cwd")) or "Claude"
 
 
+PACE_SID = "usage"      # pseudo-chat, so the warning card gets a pid file without inventing a tab
+_IS_DAEMON = False      # set by daemon(); only the daemon raises usage alerts (see reconcile)
+
+
+def _warn_pace(u, cfg):
+    """The session's burn has just tipped into red: it will run out before the window resets.
+
+    One chime and one card, at the moment it becomes true - which is the only moment when slowing
+    down still changes the outcome. The card belongs to no chat, so clicking it just dismisses."""
+    if not cfg.get("usage_alert", True):
+        return
+    hit = u.get("hit_mins")
+    body = ("session limit in ~%d min at this rate" % hit) if hit is not None \
+           else "on pace to run out before this window resets"
+    shown = False
+    if cfg.get("popup", True):
+        shown = hb._spawn_popup("Usage - burning hot", body, color=hc.FAIL_COLOR,
+                                hwnd=0, duration_ms=25000, chat="", sid=PACE_SID)
+    if not shown and cfg.get("notify", True):
+        hb.hal_notify.notify("Claude - usage", body)
+    hb.beep_detached("attention")
+
+
 # ── the reconcile pass ─────────────────────────────────────────────────────────
 def reconcile():
     """Make the set of tabs equal the set of open chats. Returns the live chats, or None when the
@@ -405,7 +428,13 @@ def reconcile():
                             branch_show=_branch_shows(live).get(sid, False))
 
     if cfg.get("usage_meter", True):
-        hal_usage.refresh(active=busy)   # 45s while a chat is running, 4 min while nothing is
+        u = hal_usage.refresh(active=busy)   # 45s while a chat is running, 4 min while nothing is
+        # Only the daemon raises it. reconcile() also runs inline inside every hook, and two
+        # processes reading `pace_alert` before either clears it would chime twice; there is exactly
+        # one daemon (a named mutex sees to that), so gating here removes the race rather than
+        # narrowing it. Costs at most one poll interval of delay, on a five-hour window.
+        if _IS_DAEMON and u.get("pace_alert") and hal_usage.clear_alert():
+            _warn_pace(u, cfg)               # cleared first: a crash must not re-chime on restart
 
     for f in glob.glob(os.path.join(hb.BADGE_DIR, "*.json")):
         sid8 = os.path.basename(f)[:-5]
@@ -559,6 +588,7 @@ def _beat():
 def daemon():
     if not _singleton():
         return
+    globals()["_IS_DAEMON"] = True     # we are the one process allowed to raise usage alerts
     os.makedirs(hb.BADGE_DIR, exist_ok=True)
     _beat()
     try:

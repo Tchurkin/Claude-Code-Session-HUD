@@ -33,6 +33,7 @@ _DEFAULTS = {
     "notify":      True,    # native desktop toast (fallback off-Windows / when popup is off)
     "sound":       True,    # short chime when a chat needs you (asking / blocked / finished)
     "usage_meter": True,    # show how much of the 5-hour session window is used (needs a login)
+    "usage_alert": True,    # chime + card the moment the burn will run the session out early
     "use_openai":  False,   # opt-in: name tabs with OpenAI. Off = Claude only (API key or CLI)
 }
 

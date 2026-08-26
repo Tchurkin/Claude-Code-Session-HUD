@@ -136,7 +136,11 @@ $render = {
 
     # Hover hint to the LEFT of the card: how to interact.
     if ($script:hover) {
-        $hint = "Click to jump"
+        # Not every card belongs to a chat - the usage warning belongs to none - and Jump-ToChat
+        # re-resolves both of these from the state file at click time, so a card given only a sid
+        # can still jump. Promise what this one can actually do rather than what most of them can.
+        $jumpable = $Chat -or $Hwnd -or ($Sid -and (Test-Path -LiteralPath (Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice\badges") "$Sid.json")))
+        $hint = if ($jumpable) { "Click to jump" } else { "Click to dismiss" }
         $hw   = [int][Math]::Ceiling($g.MeasureString($hint, $tipFont).Width)
         $hbw  = $hw + 18; $hbh = [int]$tipFont.Height + 8
         $hbx  = $GLOW + $OX - 10 - $hbw

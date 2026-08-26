@@ -40,6 +40,7 @@ TINT_PS1    = os.path.join(hc.SCRIPTS_DIR, "hal_tint.ps1")
 METER_PS1   = os.path.join(hc.SCRIPTS_DIR, "hal_meter.ps1")
 POPUP_PS1   = os.path.join(hc.SCRIPTS_DIR, "popup.ps1")
 SESSIONS_PY = os.path.join(hc.SCRIPTS_DIR, "hal_sessions.py")
+BADGE_PY    = os.path.abspath(__file__)          # for re-entering ourselves as `--beep`
 SLOTS_PATH  = os.path.join(hc.DATA_DIR, "slots.json")   # durable per-chat color memory (sid -> slot)
 IDLE_MS     = 20 * 60 * 1000     # legacy (no session registry): dismiss after this much inactivity
 TOPIC_EVERY = 30 * 60 * 1000     # how stale a name may get before a hook re-derives it. Long, on
@@ -1123,6 +1124,23 @@ def _beep(kind="attention"):
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         except Exception:
             pass
+
+
+def beep_detached(kind="attention"):
+    """Chime from a process that might be about to exit.
+
+    PlaySound is asynchronous, so the sound is cut off the moment its process ends - fine from the
+    daemon, which is long-lived, but reconcile() also runs inline inside hook processes that return
+    within milliseconds, and there you would hear nothing or a click. This hands the job to a short
+    child that outlives the caller; the --beep entry point already sleeps long enough to finish."""
+    if os.name != "nt" or not hc.load_config().get("sound", True):
+        return
+    try:
+        subprocess.Popen([sys.executable or "python", BADGE_PY, "--beep", kind],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, creationflags=hc.CREATE_NO_WINDOW)
+    except Exception:
+        _beep(kind)                       # better a clipped chime than none
 
 
 def _fg_hwnd():
