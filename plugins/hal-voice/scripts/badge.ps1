@@ -104,6 +104,9 @@ $script:StackOrd = $script:ord
 
 $GAP = 8
 $script:bottomAnchor = $screen.Bottom - 44 - $GLOW       # sit above VS Code's status bar, bottom-right
+$script:parked = $false; $script:wasParked = $false      # pushed off the top of the dock (see the poll)
+# 37 = the usage meter's own height plus its gap; it rides above the stack and must stay on screen.
+$script:stackCap = Stack-Capacity $script:bottomAnchor ($script:CH + $GAP) 37
 $script:curTop  = $script:bottomAnchor - $script:CH
 $script:target  = $script:curTop
 $script:lastTop = -99999
@@ -116,6 +119,9 @@ $script:presentTs = 0         # last time the user was actively present in this 
 $script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
 $script:maybeDrag = $false    # left button is down; still deciding click-vs-drag
 $script:dragging  = $false    # actively dragging this tab to reorder it
+$script:lastDragPub = 0       # last time we published a provisional position mid-drag
+$script:dragNear  = $false    # someone else is dragging: watch the order closely
+$script:lastStack = 0         # last time we re-read the shared stack order
 $script:dragStartY = 0
 $script:grabOffset = 0        # cursor-to-form-top offset captured at grab, so the tab tracks smoothly
 
@@ -192,6 +198,14 @@ $paint = {
 }
 
 $render = {
+    if ($script:parked) {
+        # Off the top of the dock: draw nothing at all rather than a chip nobody can reach. The
+        # process stays alive and keeps beating, so it comes straight back when there is room.
+        $blank = New-Object System.Drawing.Bitmap($FORM_W, $FORM_H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        [PerPixelLayered]::SetBitmap($form.Handle, $blank, $form.Left, $form.Top, 255)
+        $blank.Dispose()
+        return
+    }
     $accent = [System.Drawing.Color]::FromArgb($script:R, $script:G, $script:B)
     # The chip lights up when hovered OR when its own chat window is focused (the tab you're on).
     $lit = ($script:hover -or $script:active)
@@ -293,27 +307,39 @@ $form.Add_MouseDown({
     $script:grabOffset = [System.Windows.Forms.Cursor]::Position.Y - $form.Top
 })
 
-# On drop, set our order key so we sort into the gap where we were released; the others reflow.
+# The height this tab claims in the stack. Zero while parked, so it holds its place in the
+# order without taking any room. One definition, because it is written from four places.
+function SlotHeight { if ($script:parked) { return 0 } return $script:CH }
+
+# Where would this tab sort if it were released right now? Sorts into the gap it is hovering over,
+# by comparing its middle against where every other tab currently sits. Used continuously during the
+# drag so the rest of the stack gets out of the way as you move, and once more on release.
+$provisionalOrd = {
+    param($ordered)
+    $myY = $form.Top + $script:CH / 2
+    $slots = @(); $below = 0
+    foreach ($e in $ordered) {
+        $top = $script:bottomAnchor - $below - [int]$e.h
+        if ($e.id -ne $script:PopupId) {
+            $o = if ($null -ne $e.ord) { [double]$e.ord } else { [double]$e.ts }
+            $slots += [pscustomobject]@{ ord = $o; top = $top }
+        }
+        if ([int]$e.h -gt 0) { $below += [int]$e.h + $GAP }     # parked tabs occupy no slot
+    }
+    $aboveOrd = $null; $belowOrd = $null
+    foreach ($sl in ($slots | Sort-Object top)) {
+        if ($sl.top -lt $myY) { $aboveOrd = $sl.ord } elseif ($null -eq $belowOrd) { $belowOrd = $sl.ord }
+    }
+    if     ($null -ne $aboveOrd -and $null -ne $belowOrd) { return ($aboveOrd + $belowOrd) / 2 }
+    elseif ($null -ne $belowOrd) { return $belowOrd - 1000000 }   # above everything
+    elseif ($null -ne $aboveOrd) { return $aboveOrd + 1000000 }   # below everything
+    return $script:ord
+}
+
+# On drop, keep wherever we had provisionally sorted to and make it durable.
 $dropReorder = {
     try {
-        $ordered = Stack-Sync $script:CH $true
-        $myY = $form.Top + $script:CH/2
-        $slots = @(); $below = 0
-        foreach ($e in $ordered) {
-            $top = $script:bottomAnchor - $below - [int]$e.h
-            if ($e.id -ne $script:PopupId) {
-                $o = if ($null -ne $e.ord) { [double]$e.ord } else { [double]$e.ts }
-                $slots += [pscustomobject]@{ ord = $o; top = $top }
-            }
-            $below += [int]$e.h + $GAP
-        }
-        $aboveOrd = $null; $belowOrd = $null
-        foreach ($sl in ($slots | Sort-Object top)) {
-            if ($sl.top -lt $myY) { $aboveOrd = $sl.ord } elseif ($null -eq $belowOrd) { $belowOrd = $sl.ord }
-        }
-        if     ($null -ne $aboveOrd -and $null -ne $belowOrd) { $script:ord = ($aboveOrd + $belowOrd) / 2 }
-        elseif ($null -ne $belowOrd) { $script:ord = $belowOrd - 1000000 }   # dropped above everything
-        elseif ($null -ne $aboveOrd) { $script:ord = $aboveOrd + 1000000 }   # dropped below everything
+        $script:ord = & $provisionalOrd (Stack-Sync (SlotHeight) $true)
         $script:StackOrd = $script:ord
         try { [System.IO.File]::WriteAllText($script:ordMarker, [string]$script:ord) } catch {}
     } catch {}
@@ -385,8 +411,30 @@ $timer.Add_Tick({
             }
             if ($changed) { & $render }
         }
-        $ordered = Stack-Sync $script:CH $true                # stowed tabs still hold their stack slot (as slivers)
+        # A parked tab reports zero height but keeps its slot, so it still holds its place in the
+        # order. That is deliberate: the ranking below is computed over every tab, parked or not, so
+        # parking one can never change which others are parked. Were parked tabs to drop out of the
+        # list, the tab below the cut would rise above it, un-park, push the first back out, and the
+        # dock would flicker between two states forever.
+        $ordered = Stack-Sync (SlotHeight) $true
+        $limit = Stack-VisibleLimit @($ordered).Count (Hud-ConfigNum 'max_tabs' 0) $script:stackCap
+        $script:parked = ((Stack-RankOf $ordered $script:PopupId) -ge $limit)
+        if ($script:parked -ne $script:wasParked) { $script:wasParked = $script:parked; & $render }
+        $script:lastStack = $nowMs
         $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+    }
+
+    # While a tab is being dragged, re-read the order several times a second rather than waiting for
+    # the 600ms poll - otherwise the other tabs would shuffle in visible 600ms steps instead of
+    # sliding out of the way. Costs one file stat per tick the rest of the time, and the flag is a
+    # timestamp, so noticing a drag never means reading anything.
+    if (-not $script:dragging -and ($nowMs - $script:lastStack -ge 70)) {
+        $script:dragNear = Stack-DragActive
+        if ($script:dragNear) {
+            $script:lastStack = $nowMs
+            $ordered = Stack-Sync (SlotHeight) $true
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+        }
     }
     if ($script:closeReq) { $form.Close(); return }
 
@@ -412,6 +460,17 @@ $timer.Add_Tick({
                 $script:curTop = $cy - $script:grabOffset
                 $nt = [int]$script:curTop
                 if ($nt -ne $script:lastTop) { $script:lastTop = $nt; $form.Top = $nt; [PerPixelLayered]::Move($form.Handle, $form.Left, $nt) }
+                # Publish where we WOULD land, several times a second, so the rest of the stack can
+                # ease out of the way while you are still holding the tab rather than all at once
+                # when you let go. Everything needed to move them already existed - they just had
+                # nothing to react to until the drop.
+                if ($nowMs - $script:lastDragPub -ge 70) {
+                    $script:lastDragPub = $nowMs
+                    Stack-SignalDrag                       # tells the others to look more often
+                    try {
+                        $script:StackOrd = & $provisionalOrd (Stack-Sync (SlotHeight) $true)
+                    } catch {}
+                }
             }
         } else {
             $script:maybeDrag = $false
@@ -459,7 +518,7 @@ $timer.Add_Tick({
     # Adaptive cadence. 30ms while something moves or the cursor is on us, ~11fps while a chat is
     # working (just the indicator), otherwise a slow idle poll - a tab that is simply sitting there
     # has nothing to redraw and shouldn't cost anything to keep on screen.
-    $moving = $script:dragging -or $script:maybeDrag -or
+    $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or
               ([Math]::Abs($script:target - $script:curTop) -ge 0.5) -or
               ([Math]::Abs($tgtX - $script:chipX) -ge 0.5)
     $want = if ($moving -or $script:hover) { 30 }

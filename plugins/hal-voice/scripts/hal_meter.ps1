@@ -49,6 +49,7 @@ $script:sessionPct = -1; $script:weeklyPct = -1
 $script:sessionResets = ""; $script:weeklyResets = ""
 $script:sessionLeft = ""   # "2h14m" until the session window rolls over
 $script:stale = $false
+$script:parked = 0         # tabs pushed off the top of the dock, shown as "+N"
 $script:hist = @()         # recent [ms, utilization] readings, for the sparkline
 $script:histSig = ""       # cheap "has the history changed" key
 $script:pace = -1.0        # 0 coasting .. 0.5 lands on the limit .. 1 runs out at once (-1 unknown)
@@ -81,8 +82,11 @@ function StackHeight {
     # the ones we have seen before, and treats an unreadable entry as still live for a grace period:
     # an atomic replace briefly hides a file from the directory listing, and counting that as "gone"
     # made this window lurch down a slot and back. Same reasoning as Stack-Sync.
+    # Returns @(visibleCount, totalHeight, parkedCount). A tab that has been pushed off the top of
+    # the dock reports zero height but keeps its slot, so it must not contribute a gap here either -
+    # otherwise the meter floats a row higher for every tab it cannot see.
     $now = NowMs
-    $count = 0; $sum = 0
+    $count = 0; $sum = 0; $parked = 0
     try {
         $paths = New-Object System.Collections.Generic.HashSet[string]
         foreach ($x in [System.IO.Directory]::GetFiles($ns, "*.slot")) { [void]$paths.Add($x) }
@@ -99,10 +103,12 @@ function StackHeight {
                 if ($null -ne $e) { $script:slotSeen.Remove($f) }
                 continue
             }
-            if (($now - $e.beat) -lt 2500) { $count++; $sum += $e.h }
+            if (($now - $e.beat) -lt 2500) {
+                if ($e.h -le 0) { $parked++ } else { $count++; $sum += $e.h }
+            }
         }
     } catch {}
-    return @($count, $sum)
+    return @($count, $sum, $parked)
 }
 
 # The meter used to carry its own copy of the daemon watchdog, and was the only thing that had one.
@@ -287,6 +293,13 @@ $render = {
         # percentage on its own tells you where you stand but not how long you have to spend it.
         $head = if ($script:sessionLeft) { "$sp% / $($script:sessionLeft)" } else { "$sp%" }
         Draw-OutlinedText $g $head $uFont $ptc $barR ($GLOW + 1) 3 'right'
+        # Tabs pushed off the top of the dock. Sits to the left of the reading, dimmer, so the stack
+        # never just loses tabs silently - they are parked, not gone, and they come back.
+        if ($script:parked -gt 0) {
+            $hw = [int][Math]::Ceiling($g.MeasureString($head, $uFont).Width)
+            Draw-OutlinedText $g "+$($script:parked)" $uFont ([System.Drawing.Color]::FromArgb(188,188,196)) `
+                              ($barR - $hw - 8) ($GLOW + 1) 3 'right'
+        }
     }
 
     if ($script:hot -and $script:sessionPct -ge 0) {
@@ -307,6 +320,9 @@ $render = {
             } elseif ($script:projected -ge 0) {
                 $parts += "on pace for $($script:projected)%"
             }
+        }
+        if ($script:parked -gt 0) {
+            $parts += "$($script:parked) tab$(if ($script:parked -ne 1) { 's' }) parked - no room"
         }
         if ($script:weeklyPct -ge 0) {
             $wk = "weekly $($script:weeklyPct)%"
@@ -389,6 +405,7 @@ $timer.Add_Tick({
         $info = StackHeight; $cnt = $info[0]; $sum = $info[1]
         $bBottom = if ($cnt -eq 0) { $dockBottom } else { $dockBottom - ($sum + ($cnt - 1) * $GAPB) - $GAPB }
         $script:targetTop = [int]($bBottom - $CONTENT_H - $GLOW)
+        if ($info[2] -ne $script:parked) { $script:parked = $info[2]; & $render }   # "+N" tabs hidden
     }
 
     if ($nowMs - $script:lastUsage -ge 2000) {

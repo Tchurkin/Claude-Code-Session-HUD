@@ -506,7 +506,74 @@ function Stack-TargetBottom($bottomAnchor, $gap, $ordered, $selfHeight) {
     $below = 0
     foreach ($e in $ordered) {
         if ($e.id -eq $script:PopupId) { break }
+        if ([int]$e.h -le 0) { continue }     # parked: still holds its place in the order, takes no room
         $below += [int]$e.h + $gap
     }
     return [int]($bottomAnchor - $below - [int]$selfHeight)
+}
+
+# ── how many tabs actually fit ─────────────────────────────────────────────────────────────────
+# The stack grows upward from the dock and nothing ever stopped it. Past about twenty chats the
+# topmost tabs walk off the top of the screen, where they cannot be clicked and cannot be seen -
+# and the usage meter goes first, because it rides above them.
+#
+# So there is a ceiling, and it is geometric by default: tabs are only ever parked when the
+# alternative is being off-screen, which means the behaviour never surprises anyone who has not hit
+# it. `max_tabs` in the config lowers it further for anyone who wants a shorter dock.
+#
+# Parked tabs are not retired. They keep their slot file, and therefore their place in the order, so
+# the ranking every badge computes stays identical whether a tab is parked or not - which is what
+# stops the whole thing oscillating: hiding a tab must not change who else gets hidden.
+function Stack-Capacity($bottomAnchor, $pitch, $reserve, $topMargin = 8) {
+    if ($pitch -le 0) { return 1 }
+    $n = [int][Math]::Floor(($bottomAnchor - $topMargin - $reserve) / $pitch)   # Floor: [int] rounds
+    if ($n -lt 1) { return 1 }
+    return $n
+}
+
+function Stack-VisibleLimit($total, $maxTabs, $capacity) {
+    $lim = [int]$capacity
+    if (([int]$maxTabs) -gt 0 -and ([int]$maxTabs) -lt $lim) { $lim = [int]$maxTabs }
+    if ($lim -lt 1) { $lim = 1 }
+    if (([int]$total) -lt $lim) { return [int]$total }
+    return $lim
+}
+
+function Stack-RankOf($ordered, $id) {
+    for ($i = 0; $i -lt @($ordered).Count; $i++) {
+        if ($ordered[$i].id -eq $id) { return $i }
+    }
+    return 0
+}
+
+# ── live drag ──────────────────────────────────────────────────────────────────────────────────
+# Reordering used to be a surprise: you dragged a tab, nothing else moved, and the stack rearranged
+# itself the instant you let go. The tabs should get out of the way while you are still deciding.
+#
+# The mechanics are already there - every badge eases toward whatever slot the shared ordering gives
+# it - so all that was missing was for the dragged tab to publish where it currently WOULD land, and
+# for the others to look often enough to notice. This flag is how they know to look: one file whose
+# timestamp is the whole message, so the check is a stat and not a read.
+function Stack-SignalDrag {
+    try { [PerPixelLayered]::AtomicWrite((Join-Path $script:PopupDir "_drag.flag"), "$(NowMs)") } catch {}
+}
+
+function Stack-DragActive {
+    try {
+        $f = Join-Path $script:PopupDir "_drag.flag"
+        $age = ([DateTime]::UtcNow - [System.IO.File]::GetLastWriteTimeUtc($f)).TotalMilliseconds
+        return ($age -ge 0 -and $age -lt 700)
+    } catch { return $false }
+}
+
+function Hud-ConfigNum($name, $default) {
+    try {
+        $mt = [System.IO.File]::GetLastWriteTimeUtc($script:HalCfgPath)
+        if ($mt -ne $script:cfgMt) { $script:cfgCache = Read-JsonFile $script:HalCfgPath; $script:cfgMt = $mt }
+    } catch { }
+    $c = $script:cfgCache
+    if ($c -and ($c.PSObject.Properties.Name -contains $name)) {
+        try { return [double]$c.$name } catch { return $default }
+    }
+    return $default
 }
