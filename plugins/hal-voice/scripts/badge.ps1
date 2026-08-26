@@ -343,6 +343,9 @@ $timer.Add_Tick({
     if ($nowMs - $script:lastPoll -ge 600) {
         $script:lastPoll = $nowMs
         $now = $nowMs
+        # One badge per open chat, and only the daemon can retire one - so badges outlive it and
+        # make the natural watchers. Self-throttled and jittered; see Poll-HudDaemon.
+        Poll-HudDaemon
         if (-not (Hud-Enabled)) { $script:closeReq = $true }                  # HUD switched off -> retire
         $st = Read-State
         if ($null -eq $st) {

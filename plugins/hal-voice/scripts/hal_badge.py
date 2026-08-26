@@ -74,7 +74,7 @@ def _alive_fresh(sid):
     return age is not None and age < 4000
 
 
-def _reap_wedged(path, stale_ms=9000):
+def _reap_wedged(path, stale_ms=None):
     """An overlay whose heartbeat has gone stale while its process is still running is wedged - its
     frames are throwing. Kill it.
 
@@ -82,6 +82,8 @@ def _reap_wedged(path, stale_ms=9000):
     replacement the supervisor spawns exit immediately at startup. The heartbeat stays stale, the
     spawn is retried forever, and the HUD is permanently and silently missing that piece - which is
     exactly how the window banners disappeared."""
+    if stale_ms is None:
+        stale_ms = hc.DAEMON_STALE_MS
     age, pid = _read_beat(path)
     if age is None or age < stale_ms or pid <= 0:
         return
@@ -773,8 +775,21 @@ def _ensure_daemon():
         return                                  # nothing renders tabs off Windows - don't leave a daemon
     ap = os.path.join(BADGE_DIR, "sessions_daemon.alive")
     try:
-        if time.time() * 1000 - float(open(ap).read().strip().split()[0]) < 9000:
+        if time.time() * 1000 - float(open(ap).read().strip().split()[0]) < hc.DAEMON_STALE_MS:
             return
+    except Exception:
+        pass
+    # The daemon is a singleton like the overlays, so it can wedge like one: a process still running
+    # but no longer beating still holds "hal_session_daemon", and every replacement then exits at
+    # startup, forever. The other singletons have always been reaped here; the daemon never was.
+    _reap_wedged(ap)
+    try:
+        # Record the interpreter here too, not only from inside a daemon that already started. The
+        # PowerShell watchers read this file to find python, and it used to be written exclusively
+        # by the thing they are trying to start - so on a fresh machine, or once it was deleted,
+        # they gave up silently at precisely the moment they were the only thing left.
+        with open(os.path.join(BADGE_DIR, "sessions_daemon.exe"), "w", encoding="utf-8") as f:
+            f.write(sys.executable or "python")
     except Exception:
         pass
     try:

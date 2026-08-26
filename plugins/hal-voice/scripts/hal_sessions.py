@@ -30,6 +30,8 @@ PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 
 POLL_MS       = 4000      # daemon: how often to re-check which chats are open
 IDLE_POLL_MS  = 12000     # daemon: slower beat while the HUD is switched off (nothing to draw)
+BEAT_MS       = 3000      # daemon: heartbeat cadence - must stay well under DAEMON_STALE_MS
+DAEMON_STALE_MS = hc.DAEMON_STALE_MS   # one definition, shared with the watchers (see hal_common)
 RETIRE_MS     = 10000     # grace before a tab whose chat left the registry is closed
 EMPTY_EXIT_MS = 120000    # no chats open at all for this long -> daemon exits (a hook respawns it)
 LABEL_GAP_MS  = 6000      # spacing between background name lookups (they cost an LLM call)
@@ -524,8 +526,13 @@ def _singleton():
     if os.name == "nt":
         try:
             import ctypes
-            h = ctypes.windll.kernel32.CreateMutexW(None, True, "hal_session_daemon")
-            if not h or ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            # use_last_error, because plain ctypes.windll does not preserve GetLastError across the
+            # call boundary - it can be clobbered by anything ctypes itself does on the way back. A
+            # false "already exists" here means the daemon refuses to start for good while every
+            # watcher keeps respawning it, which is the worst failure this file has.
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            h = k32.CreateMutexW(None, True, "hal_session_daemon")
+            if not h or ctypes.get_last_error() == 183:                 # ERROR_ALREADY_EXISTS
                 return False
             globals()["_MUTEX_HANDLE"] = h            # held for the process's lifetime
             return True
@@ -536,7 +543,7 @@ def _singleton():
 
 def daemon_alive():
     try:
-        return (_now() - float(open(ALIVE_FILE).read().strip().split()[0])) < 9000
+        return (_now() - float(open(ALIVE_FILE).read().strip().split()[0])) < DAEMON_STALE_MS
     except Exception:
         return False
 
@@ -589,7 +596,16 @@ def daemon():
                     break
             except Exception:
                 pass
-            time.sleep(wait / 1000.0)
+            # Beat while sleeping, not just once per pass. The idle wait is 12s and every watcher
+            # calls anything older than 9s dead, so a single beat per iteration made an idle daemon
+            # look like a corpse for three seconds out of every twelve - and each watcher would
+            # helpfully start a replacement, which then exits on the mutex. Nobody noticed because
+            # the waste is invisible; adding watchers would have multiplied it by their number.
+            slept = 0
+            while slept < wait:
+                time.sleep(min(BEAT_MS, wait - slept) / 1000.0)
+                slept += BEAT_MS
+                _beat()
     finally:
         stop.set()
         try: os.remove(ALIVE_FILE)

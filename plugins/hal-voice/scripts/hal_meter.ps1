@@ -67,9 +67,7 @@ $form.Width  = $FORM_W; $form.Height = $FORM_H
 $form.Left   = $screen.Right - $UW - 16 - $GLOW - $TIP_W     # right edge lines up with the tabs
 
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
-$badgeDir   = Join-Path $env:USERPROFILE ".claude\hal_voice\badges"
 $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.json"
-$sessionsPy = Join-Path $PSScriptRoot 'hal_sessions.py'
 $dockBottom = $screen.Bottom - 44                  # above VS Code's status bar
 $GAPB = 8
 $script:curTop    = $dockBottom - $CONTENT_H - $GLOW
@@ -107,29 +105,10 @@ function StackHeight {
     return @($count, $sum)
 }
 
-# Keep the session reconciler alive. This is the HUD's other always-on process, so it makes a good
-# watchdog: if the daemon's heartbeat has gone stale, start it again from the interpreter it
-# recorded for us (the daemon holds a named mutex, so a double-start resolves to one).
-function Ensure-SessionDaemon {
-    $ap  = Join-Path $badgeDir "sessions_daemon.alive"
-    $now = NowMs
-    try {
-        $beat = [int64](((Read-TextShared $ap).Trim() -split '\s+')[0])
-        if (($now - $beat) -lt 9000) { return }
-    } catch {}
-    $exe = ""
-    try { $exe = (Read-TextShared (Join-Path $badgeDir "sessions_daemon.exe")).Trim() } catch {}
-    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return }
-    try { [PerPixelLayered]::AtomicWrite($ap, "$now 0") } catch {}
-    try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe
-        $psi.Arguments = '"{0}" --daemon' -f $sessionsPy
-        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
-    } catch {}
-}
+# The meter used to carry its own copy of the daemon watchdog, and was the only thing that had one.
+# It now lives in popup_common.ps1 (Ensure-HudDaemon), where the badges and the tint can reach it
+# too - so the daemon is watched by everything on screen rather than by one process that the daemon
+# was in turn the only watcher of.
 
 function RoundedPath($x, $y, $w, $h, $rad) {
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -462,7 +441,7 @@ $timer.Add_Tick({
         if ([PerPixelLayered]::FindWindowEndsWith("Visual Studio Code") -ne [IntPtr]::Zero) { $script:lastVs = NowMs }
         elseif (($nowMs - $script:lastVs) -gt 30000) { $form.Close(); return }
     }
-    if ($nowMs - $script:lastDaemon -ge 3000) { $script:lastDaemon = $nowMs; Ensure-SessionDaemon; Assert-Topmost $form }
+    if ($nowMs - $script:lastDaemon -ge 3000) { $script:lastDaemon = $nowMs; Ensure-HudDaemon; Assert-Topmost $form }
 
     $cp = [System.Windows.Forms.Cursor]::Position
     $mx = $form.Left + $GLOW + $OX; $my = $script:lastTop + $GLOW

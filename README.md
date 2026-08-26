@@ -65,6 +65,14 @@ once nothing is open) *and* inline on every hook, so a missing tab heals within 
 the daemon isn't up. On an older CLI with no session registry, the badge falls back to its
 previous hook-only lifecycle.
 
+That daemon is the root of everything on screen, so **everything on screen watches it back**: each
+tab badge, the window tint and the usage meter all revive it if its heartbeat goes quiet. Badges
+matter most — there's one per open chat, so the number of watchers scales with what there is to
+lose, and only the daemon can retire a badge, so they outlive it. A cross-process mutex means N
+watchers noticing at once still produce exactly one daemon, and a daemon that's stopped responding
+without exiting gets reaped first — it would otherwise still hold the singleton lock and make every
+replacement exit on startup, forever.
+
 Which **window** a tab points at is worked out by evidence rather than guesswork, best source first.
 The companion extension runs inside each window and writes what it's holding — every chat tab, and
 which is in front — to `~/.claude/hal_voice/windows/`; that places even a chat sitting in a

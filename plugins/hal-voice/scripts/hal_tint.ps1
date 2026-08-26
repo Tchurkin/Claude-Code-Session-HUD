@@ -95,6 +95,7 @@ $timer.Interval = 120
 $timer.Add_Tick({
     if (($script:tintTick++ % 8) -eq 0 -and -not (Hud-Enabled)) { $form.Close(); return }   # HUD off -> retire
     if (($script:tintTick % 8) -eq 3) { Assert-Topmost $form }   # another app can steal the band
+    if (($script:tintTick % 25) -eq 7) { Poll-HudDaemon }        # second watcher, off the badges' frame
     $fg  = [PerPixelLayered]::GetForegroundWindow()
     $col = ColorForHwnd ([int64]$fg)
     $drew = $false

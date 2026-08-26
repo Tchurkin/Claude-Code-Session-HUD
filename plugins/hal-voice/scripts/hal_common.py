@@ -17,6 +17,13 @@ PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(SCRIPTS_DI
 
 CREATE_NO_WINDOW = 0x08000000   # Windows: don't flash a console window for child procs
 
+# How long an overlay or the daemon may go without a heartbeat before a watcher calls it dead and
+# either reaps or replaces it. Lives here because everything that watches anything needs it, and it
+# was previously copied out four times - which is precisely how the daemon came to beat every 12
+# seconds against a 9 second threshold and look like a corpse to every watcher, forever, unnoticed.
+# The PowerShell side keeps its own copy in popup_common.ps1; a test asserts the two agree.
+DAEMON_STALE_MS = 9000
+
 _DEFAULTS = {
     "enabled":     True,    # master on/off for the whole HUD (flip via the VS Code status-bar extension)
     "badge":       True,    # persistent per-chat color badge window (bottom-right)

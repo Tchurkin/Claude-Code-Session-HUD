@@ -294,6 +294,89 @@ function Write-Beat($path) {
     if (-not $path) { return }
     try { [PerPixelLayered]::AtomicWrite($path, "$(NowMs) $PID") } catch {}
 }
+
+# ── keeping the reconciler alive ───────────────────────────────────────────────────────────────
+# The daemon is the root of the whole HUD: it is what gives every open chat a tab, what retires the
+# ones that closed, and the only thing that refreshes the usage figures. Until now it was watched by
+# exactly one process - the usage meter - which the daemon in turn watched. Two processes minding
+# each other is not supervision: kill both inside a few seconds and the HUD stays down until a hook
+# happens to fire. That is not hypothetical, it is what we watched happen.
+#
+# So every overlay that dot-sources this file can now revive it. Badges are the important ones -
+# there is one per open chat, so the watcher count scales with what there is to lose, and they
+# survive everything the daemon does because only the daemon can retire them.
+$script:HalScriptsDir = $PSScriptRoot
+$script:HalBadgeDir   = Join-Path $env:USERPROFILE ".claude\hal_voice\badges"
+$script:DaemonStaleMs = 9000        # keep in step with hal_sessions.DAEMON_STALE_MS
+$script:lastDaemonChk = 0
+$script:daemonJitter  = Get-Random -Minimum 0 -Maximum 2500   # de-phase the herd
+
+function Resolve-HalPython {
+    param([string]$BadgeDir = $script:HalBadgeDir)
+    try {
+        $e = (Read-TextShared (Join-Path $BadgeDir "sessions_daemon.exe")).Trim()
+        if ($e -and (Test-Path -LiteralPath $e)) { return $e }
+    } catch {}
+    foreach ($n in @('pythonw.exe', 'python.exe')) {   # the note said python, the PATH will do
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c) { return $c.Source }
+    }
+    return ""
+}
+
+function Ensure-HudDaemon {
+    param([string]$BadgeDir = $script:HalBadgeDir,
+          [string]$SessionsPy = (Join-Path $script:HalScriptsDir 'hal_sessions.py'))
+    $ap = Join-Path $BadgeDir "sessions_daemon.alive"
+    $now = NowMs
+    $beat = 0; $dpid = 0
+    try {
+        $p = (Read-TextShared $ap).Trim() -split '\s+'
+        $beat = [int64]$p[0]
+        if ($p.Count -gt 1) { $dpid = [int]$p[1] }
+    } catch {}
+    if ($beat -gt 0 -and (($now - $beat) -lt $script:DaemonStaleMs)) { return }
+
+    # Whoever takes this mutex is the one that launches. The pre-mark below is the cheap filter and
+    # does most of the work, but it is a read-then-write, not a test-and-set: without this gate,
+    # eight badges noticing in the same millisecond genuinely start eight interpreters, and seven of
+    # them pay a full python startup before losing the daemon's own mutex and exiting.
+    $got = $false
+    $mx = New-Object System.Threading.Mutex($false, "hal_session_daemon_spawn")
+    try {
+        try { $got = $mx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+        if (-not $got) { return }
+        try {   # re-read under the gate: the winner may already have pre-marked it
+            $b2 = [int64](((Read-TextShared $ap).Trim() -split '\s+')[0])
+            if (($now - $b2) -lt $script:DaemonStaleMs) { return }
+        } catch {}
+        # A daemon that stopped beating but is still running is wedged, and it still owns
+        # "hal_session_daemon" - so a replacement would exit on startup and we would respawn forever.
+        if ($dpid -gt 0) { try { Stop-Process -Id $dpid -Force -ErrorAction SilentlyContinue } catch {} }
+        $exe = Resolve-HalPython $BadgeDir
+        if (-not $exe) { return }
+        try { [PerPixelLayered]::AtomicWrite($ap, "$now 0") } catch {}
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = '"{0}" --daemon' -f $SessionsPy
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
+    } catch {
+    } finally {
+        if ($got) { try { $mx.ReleaseMutex() } catch {} }
+        try { $mx.Dispose() } catch {}
+    }
+}
+
+# Call this from a tick; it rate-limits itself, with per-process jitter so N badges do not all check
+# on the same frame.
+function Poll-HudDaemon {
+    $now = NowMs
+    if (($now - $script:lastDaemonChk) -lt (3000 + $script:daemonJitter)) { return }
+    $script:lastDaemonChk = $now
+    Ensure-HudDaemon
+}
 $script:BornMs  = NowMs             # stable birth time
 $script:slotCache = @{}             # last good read per slot file (see Stack-Sync)
 $script:SLOT_LIVE_MS = 2500        # beat age at which an overlay counts as gone (beats every 600ms)
