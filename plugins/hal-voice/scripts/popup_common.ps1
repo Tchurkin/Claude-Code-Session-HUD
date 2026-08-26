@@ -135,13 +135,62 @@ public class PerPixelLayered {
     // Publish a small file so readers see either the old contents or the new, never a torn read.
     // These files are written several times a second and read by every other overlay; a plain
     // WriteAllText truncates first, and a reader landing in that window sees an empty file.
+    // One short line, written in place, readable while it is being written.
+    //
+    // This used to write a temp file and rename it over the target. That cost 7.6ms a call on this
+    // machine, against 0.6ms for the write below - the rename churns directory metadata, which is
+    // the most expensive thing you can ask a filesystem with a virus scanner attached to do. Every
+    // overlay writes two of these a second, so it was most of what the HUD cost while idle.
+    //
+    // The weaker guarantee is fine here, and arguably better. The file is padded to a fixed width
+    // and so never changes length: there is no truncation window, and a reader gets the old line or
+    // the new one. Every reader already tolerates a bad parse anyway - the slot walker holds its
+    // last good value through a grace period, and an unparseable heartbeat reads as "no beat",
+    // which needs nine seconds of agreement before anything acts on it. Python writes the same
+    // heartbeat files with a plain truncating open() and always has.
+    //
+    // And the rename was itself the cause of a bug: a file being renamed briefly vanishes from the
+    // directory listing, which made tabs slide up a slot and back. Writing in place cannot do that.
+    // Read a file another process may be writing. In here rather than in PowerShell because the
+    // PowerShell version needed two New-Object calls, and New-Object is a cmdlet: it cost 2.1ms a
+    // call against 0.05ms for this. Every overlay reads every other overlay's slot file more than
+    // once a second, so that difference was most of what the tab dock cost while doing nothing.
+    // Throws exactly as before when the file is missing or briefly locked; callers already catch.
+    public static string ReadText(string path){
+        using (System.IO.FileStream fs = new System.IO.FileStream(
+                   path, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                   System.IO.FileShare.ReadWrite))
+        using (System.IO.StreamReader sr = new System.IO.StreamReader(fs))
+            return sr.ReadToEnd();
+    }
+    // Every slot file in a directory, read in one call: each entry is "path|contents". A pipe
+    // cannot occur in a Windows path, and slot contents are a GUID and four numbers, so it is an
+    // unambiguous separator without resorting to an invisible control character.
+    //
+    // The walk used to live in PowerShell: a function call per file, plus a function call per read.
+    // A PowerShell function invocation costs ~300us whatever it does, so a five-tab dock spent most
+    // of its idle budget on call overhead rather than on the eight hundred bytes it was reading.
+    // This is the single hottest thing the HUD does - every overlay does it more than once a second.
+    public static string[] ReadDir(string dir, string pattern){
+        string[] files;
+        try { files = System.IO.Directory.GetFiles(dir, pattern); }
+        catch { return new string[0]; }
+        System.Collections.Generic.List<string> outp = new System.Collections.Generic.List<string>(files.Length);
+        foreach (string f in files) {
+            try { outp.Add(f + "|" + ReadText(f)); }
+            catch { }                       // being replaced, or gone since the listing: skip it
+        }
+        return outp.ToArray();
+    }
+    const int LINE_W = 128;
     public static void AtomicWrite(string path, string text){
-        string tmp = path + ".w" + System.Diagnostics.Process.GetCurrentProcess().Id;
-        System.IO.File.WriteAllText(tmp, text);
-        try { System.IO.File.Replace(tmp, path, null); }          // atomic when the target exists
-        catch {
-            try { System.IO.File.Move(tmp, path); }               // first write: no target yet
-            catch { try { System.IO.File.Copy(tmp, path, true); System.IO.File.Delete(tmp); } catch {} }
+        byte[] b = System.Text.Encoding.UTF8.GetBytes(text.Length < LINE_W ? text.PadRight(LINE_W) : text);
+        using (System.IO.FileStream fs = new System.IO.FileStream(
+                   path, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.Write,
+                   System.IO.FileShare.ReadWrite)) {
+            fs.Write(b, 0, b.Length);
+            if (fs.Length != b.Length) { fs.SetLength(b.Length); }   // only ever on the first write
+            fs.Flush();
         }
     }
     public static void SetBitmap(IntPtr h, Bitmap bmp, int left, int top, byte opacity){
@@ -240,17 +289,7 @@ function Jump-ToChat($chat, $hwnd, $sid) {
 # denies writers for the duration. The visible symptom was tabs twitching: a reader and a writer
 # collide, the reader sees an error, that tab drops out of the stack for one pass and everything
 # below it slides up and then back down. (It can also make the Python side's state write fail.)
-function Read-TextShared($path) {
-    $fs = $null; $sr = $null
-    try {
-        $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open,
-                                              [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $sr = New-Object System.IO.StreamReader($fs)
-        return $sr.ReadToEnd()
-    } finally {
-        if ($sr) { $sr.Dispose() } elseif ($fs) { $fs.Dispose() }
-    }
-}
+function Read-TextShared($path) { return [PerPixelLayered]::ReadText($path) }
 
 # Draw text with a crisp dark outline behind it. The overlays float over whatever happens to be on
 # screen, so text that isn't sitting on one of our own dark chips has no idea what colour its
@@ -395,34 +434,63 @@ function Stack-Sync($height, $alive) {
         [PerPixelLayered]::AtomicWrite($script:SlotFile,
             ("{0} {1} {2} {3} {4}" -f $script:PopupId, $script:BornMs, $script:StackOrd, [int]$height, $now))
     } catch {}
+    return Stack-Peek $true
+}
 
+# Write our own slot without reading anybody else's.
+#
+# Opening a file costs ~135us on Windows however small it is, so a five-tab dock re-reading every
+# slot at 600ms was spending most of its idle budget on file opens. But the ORDER almost never
+# changes - only the beats inside the files do - so the write and the read want different cadences:
+# beat often, re-read rarely, and notice structural change by the directory's own timestamp, which
+# ticks when a slot is created or deleted and costs a single stat.
+function Stack-Write($height) {
+    try {
+        [PerPixelLayered]::AtomicWrite($script:SlotFile,
+            ("{0} {1} {2} {3} {4}" -f $script:PopupId, $script:BornMs, $script:StackOrd, [int]$height, (NowMs)))
+    } catch {}
+}
+
+function Stack-DirStamp {
+    try { return [System.IO.Directory]::GetLastWriteTimeUtc($script:PopupDir).Ticks } catch { return 0 }
+}
+
+# Read the order without writing anything. Split out of Stack-Sync for the drag: while a tab is
+# being moved the others need to re-read the order many times a second, and they have no reason to
+# rewrite their own slot file that often - an atomic replace apiece, per frame, per badge, is real
+# I/O on the UI thread and it showed up as stutter in exactly the moment that wants to be smooth.
+# Reaping is the writer's job too, so a peek never deletes anything.
+function Stack-Peek($reap = $false) {
+    $now = NowMs
     $live = New-Object System.Collections.ArrayList
     try {
-        # Walk the files on disk UNION the ones we've seen before. An atomic replace makes the file
-        # briefly disappear from the directory listing, and a path that isn't listed never reaches
-        # the grace check below - so the entry silently vanished for a poll, every tab under it slid
-        # up a slot, and slid back when it reappeared. That was the jitter.
+        # Every slot on disk, listed and read in ONE compiled call. It used to be a PowerShell
+        # function call per file plus another per read, at ~300us of interpreter overhead apiece,
+        # which was most of what an idle tab dock cost.
+        $fresh = @{}
+        foreach ($e in [PerPixelLayered]::ReadDir($script:PopupDir, "*.slot")) {
+            $i = $e.IndexOf("|")
+            if ($i -lt 1) { continue }
+            $f = $e.Substring(0, $i)
+            $p = $e.Substring($i + 1).Trim() -split ' '
+            if ($p.Count -lt 5) { continue }
+            $o = [pscustomobject]@{ id = $p[0]; ts = [double]$p[1]; ord = [double]$p[2]
+                                    h = [int]$p[3]; beat = [int64]$p[4]; seen = $now }
+            $fresh[$f] = $o
+            $script:slotCache[$f] = $o
+        }
+        # Walk what we just read UNION what we have seen before. A file that is momentarily
+        # unreadable, or briefly missing from the listing, says nothing about whether that overlay
+        # is alive - so hold the last good entry as live for a grace period instead of letting it
+        # drop out. Letting entries vanish is what made every tab below one slide up a slot and back:
+        # that was the jitter. Death is still detected honestly, by a readable file whose beat has
+        # stopped moving.
         $paths = New-Object System.Collections.Generic.HashSet[string]
-        foreach ($x in [System.IO.Directory]::GetFiles($script:PopupDir, "*.slot")) { [void]$paths.Add($x) }
+        foreach ($x in $fresh.Keys) { [void]$paths.Add($x) }
         foreach ($x in @($script:slotCache.Keys)) { [void]$paths.Add($x) }
         foreach ($f in $paths) {
-            $o = $null
-            try {
-                $p = (Read-TextShared $f).Trim() -split ' '
-                if ($p.Count -ge 5) {
-                    $o = [pscustomobject]@{ id = $p[0]; ts = [double]$p[1]; ord = [double]$p[2]
-                                            h = [int]$p[3]; beat = [int64]$p[4]; seen = $now }
-                    $script:slotCache[$f] = $o
-                }
-            } catch { }
+            $o = $fresh[$f]
             if ($null -eq $o) {
-                # Couldn't read it this instant - it's being replaced, or briefly locked. That says
-                # nothing about whether that overlay is alive, so don't let it evict the entry: hold
-                # the last good one as live for a grace period. Letting the cached BEAT age out
-                # instead meant a run of failed reads silently dropped a tab from this process's view
-                # of the stack, and everything below it slid up a slot and back - the jitter that
-                # survived the first fix. Death is still detected the honest way, by a readable file
-                # whose beat has stopped moving.
                 $o = $script:slotCache[$f]
                 if ($null -eq $o) { continue }
                 if (($now - $o.seen) -lt $script:SLOT_READ_GRACE) { [void]$live.Add($o); continue }
@@ -430,12 +498,14 @@ function Stack-Sync($height, $alive) {
                 continue
             }
             if (($now - $o.beat) -lt $script:SLOT_LIVE_MS) { [void]$live.Add($o) }
-            elseif (($now - $o.beat) -ge 5000) {
+            elseif ($reap -and ($now - $o.beat) -ge 5000) {
                 try { [System.IO.File]::Delete($f); $script:slotCache.Remove($f) } catch {}
             }
         }
-        foreach ($old in [System.IO.Directory]::GetFiles($script:PopupDir, "*.json")) {   # old format
-            try { [System.IO.File]::Delete($old) } catch {}          # leftovers from the JSON format
+        if ($reap) {
+            foreach ($old in [System.IO.Directory]::GetFiles($script:PopupDir, "*.json")) {  # old format
+                try { [System.IO.File]::Delete($old) } catch {}      # leftovers from the JSON format
+            }
         }
     } catch {}
     return @($live | Sort-Object -Property @{ Expression = { if ($null -ne $_.ord) { [double]$_.ord } else { [double]$_.ts } } } -Descending)
@@ -554,13 +624,20 @@ function Stack-RankOf($ordered, $id) {
 # it - so all that was missing was for the dragged tab to publish where it currently WOULD land, and
 # for the others to look often enough to notice. This flag is how they know to look: one file whose
 # timestamp is the whole message, so the check is a stat and not a read.
+function Stack-DragFlagPath {
+    # Cached: Join-Path is a cmdlet at ~125us a call, and Stack-DragActive runs every frame
+    # of every badge. The namespace is set once at startup and never moves.
+    if (-not $script:dragFlagPath) { $script:dragFlagPath = $script:PopupDir + "\_drag.flag" }
+    return $script:dragFlagPath
+}
+
 function Stack-SignalDrag {
-    try { [PerPixelLayered]::AtomicWrite((Join-Path $script:PopupDir "_drag.flag"), "$(NowMs)") } catch {}
+    try { [PerPixelLayered]::AtomicWrite((Stack-DragFlagPath), "$(NowMs)") } catch {}
 }
 
 function Stack-DragActive {
     try {
-        $f = Join-Path $script:PopupDir "_drag.flag"
+        $f = Stack-DragFlagPath
         $age = ([DateTime]::UtcNow - [System.IO.File]::GetLastWriteTimeUtc($f)).TotalMilliseconds
         return ($age -ge 0 -and $age -lt 700)
     } catch { return $false }

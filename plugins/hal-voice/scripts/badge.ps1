@@ -122,6 +122,9 @@ $script:dragging  = $false    # actively dragging this tab to reorder it
 $script:lastDragPub = 0       # last time we published a provisional position mid-drag
 $script:dragNear  = $false    # someone else is dragging: watch the order closely
 $script:lastStack = 0         # last time we re-read the shared stack order
+$script:lastFrame = 0         # frame clock, so easing is a speed rather than a per-frame step
+$script:lastStamp = 0         # directory timestamp: ticks when a tab appears or leaves
+$script:lastFullRead = 0      # last time we actually opened everyone else's slot file
 $script:dragStartY = 0
 $script:grabOffset = 0        # cursor-to-form-top offset captured at grab, so the tab tracks smoothly
 
@@ -416,12 +419,22 @@ $timer.Add_Tick({
         # parking one can never change which others are parked. Were parked tabs to drop out of the
         # list, the tab below the cut would rise above it, un-park, push the first back out, and the
         # dock would flicker between two states forever.
-        $ordered = Stack-Sync (SlotHeight) $true
-        $limit = Stack-VisibleLimit @($ordered).Count (Hud-ConfigNum 'max_tabs' 0) $script:stackCap
-        $script:parked = ((Stack-RankOf $ordered $script:PopupId) -ge $limit)
-        if ($script:parked -ne $script:wasParked) { $script:wasParked = $script:parked; & $render }
-        $script:lastStack = $nowMs
-        $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+        # Beat every pass, but only re-read everyone else's slot when the set of them might have
+        # changed - the directory's timestamp ticks on a create or delete and costs one stat, where
+        # reading five slots costs five file opens at ~135us each. A tab appearing or leaving is
+        # caught immediately; an ord or height changing inside a file is caught by the fallback,
+        # and while a drag is in progress the block below re-reads at frame rate anyway.
+        Stack-Write (SlotHeight)
+        $stamp = Stack-DirStamp
+        if ($stamp -ne $script:lastStamp -or ($nowMs - $script:lastFullRead) -ge 2400) {
+            $script:lastStamp = $stamp; $script:lastFullRead = $nowMs
+            $ordered = Stack-Peek $true
+            $limit = Stack-VisibleLimit @($ordered).Count (Hud-ConfigNum 'max_tabs' 0) $script:stackCap
+            $script:parked = ((Stack-RankOf $ordered $script:PopupId) -ge $limit)
+            if ($script:parked -ne $script:wasParked) { $script:wasParked = $script:parked; & $render }
+            $script:lastStack = $nowMs
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+        }
     }
 
     # While a tab is being dragged, re-read the order several times a second rather than waiting for
@@ -432,8 +445,9 @@ $timer.Add_Tick({
         $script:dragNear = Stack-DragActive
         if ($script:dragNear) {
             $script:lastStack = $nowMs
-            $ordered = Stack-Sync (SlotHeight) $true
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+            # Peek, not Sync: we only want to know where everyone is, and rewriting our own slot
+            # file every frame while somebody drags is I/O on the paint thread for no reason.
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP (Stack-Peek) $script:CH
         }
     }
     if ($script:closeReq) { $form.Close(); return }
@@ -479,10 +493,20 @@ $timer.Add_Tick({
         }
     }
 
+    # How long the last frame actually took. The ease used to be a flat fraction per frame, which
+    # ties how fast a tab moves to how often the timer happens to fire - raise the frame rate to
+    # smooth the motion and everything also gets twice as fast, and a stalled frame teleports it.
+    # Converting the fraction to a rate keeps the speed identical at any frame rate.
+    $dt = $nowMs - $script:lastFrame
+    if ($dt -le 0) { $dt = $script:curInterval }
+    if ($dt -gt 120) { $dt = 120 }              # after a real stall, catch up smoothly, not instantly
+    $script:lastFrame = $nowMs
+    $ease = 1 - [Math]::Pow(1 - 0.22, $dt / 30.0)     # 0.22 per 30ms, however the frames land
+
     # vertical: ease into the stack slot (slides the already-blitted surface, no redraw)
     if (-not $script:dragging) {
         $delta = $script:target - $script:curTop
-        if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * 0.22 }
+        if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * $ease }
         $newTop = [int]$script:curTop
         if ($newTop -ne $script:lastTop) {
             $script:lastTop = $newTop
@@ -495,7 +519,7 @@ $timer.Add_Tick({
     $tgtX = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }
     $dx = $tgtX - $script:chipX
     if ([Math]::Abs($dx) -lt 0.5) { if ($script:chipX -ne $tgtX) { $script:chipX = $tgtX; $needRender = $true } }
-    else { $script:chipX += $dx * 0.25; $needRender = $true }
+    else { $script:chipX += $dx * (1 - [Math]::Pow(1 - 0.25, $dt / 30.0)); $needRender = $true }
 
     # Hover over the VISIBLE part of the tab (cursor-rect poll; MouseLeave is unreliable here).
     $visL = $form.Left + [int]$script:chipX
@@ -521,7 +545,10 @@ $timer.Add_Tick({
     $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or
               ([Math]::Abs($script:target - $script:curTop) -ge 0.5) -or
               ([Math]::Abs($tgtX - $script:chipX) -ge 0.5)
-    $want = if ($moving -or $script:hover) { 30 }
+    # 15ms is the practical floor for a WinForms timer (the message clock ticks ~15.6ms), and
+    # it is what makes a drag look continuous rather than stepped. Only while something moves.
+    $want = if ($moving) { 15 }
+            elseif ($script:hover) { 30 }
             elseif ($script:State -in @("working", "waiting", "asking")) { 90 }
             else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }

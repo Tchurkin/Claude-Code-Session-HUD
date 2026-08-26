@@ -152,11 +152,11 @@ check("Stack-VisibleLimit" in BADGE and "Stack-RankOf" in BADGE, "the badge comp
 # before, which is two more than it takes for them to disagree.
 check(re.search(r"function SlotHeight \{ if \(\$script:parked\) \{ return 0 \}", BADGE),
       "a parked badge claims zero height")
-check("Stack-Sync $script:CH $true" not in BADGE,
-      "and no live sync bypasses that, or a parked tab would still take up a slot")
-check(len(re.findall(r"Stack-Sync \(SlotHeight\) \$true", BADGE)) >= 3,
-      "every live sync goes through it (found %d)"
-      % len(re.findall(r"Stack-Sync \(SlotHeight\) \$true", BADGE)))
+for bypass in ("Stack-Sync $script:CH $true", "Stack-Write $script:CH"):
+    check(bypass not in BADGE,
+          "no live publish bypasses it (%r), or a parked tab would still take up a slot" % bypass)
+publishes = len(re.findall(r"Stack-(?:Sync|Write) \(SlotHeight\)", BADGE))
+check(publishes >= 3, "every publish of our height goes through it (found %d)" % publishes)
 check("Stack-Capacity" in BADGE, "and derives its ceiling from the screen")
 check(re.search(r"if \(\$script:parked\) \{", BADGE), "and draws nothing when parked")
 check("Hud-ConfigNum 'max_tabs' 0" in BADGE, "honouring max_tabs, defaulting to geometric")

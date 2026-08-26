@@ -70,7 +70,7 @@ print("signal: fresh -> active, 400ms -> active, 3s -> expired, missing -> quiet
 common = open(COMMON_PS1, encoding="utf-8").read()
 import fnmatch                          # noqa: E402
 
-check('"_drag.flag"' in common, "the flag has its own name")
+check("_drag.flag" in common, "the flag has its own name")
 STACK_DIRS = ("$script:PopupDir", "$ns")     # the two names the stack directory goes by
 found = 0
 for name in ("popup_common.ps1", "hal_meter.ps1", "badge.ps1"):
@@ -100,8 +100,8 @@ check(re.search(r"Stack-SignalDrag(?:.|\n){0,400}?\$script:StackOrd = & \$provis
 
 # The other side: notice a drag quickly, but never re-read the order at speed when nothing is moving.
 check(re.search(r"\$script:dragNear = Stack-DragActive", BADGE), "an idle badge checks for a drag")
-check(re.search(r"if \(\$script:dragNear\) \{(?:.|\n)*?Stack-Sync", BADGE),
-      "and only then re-reads the order out of turn")
+check(re.search(r"if \(\$script:dragNear\) \{(?:.|\n){0,500}?Stack-Peek", BADGE),
+      "and only then re-reads the order out of turn - Peek, so it does not rewrite its own slot")
 check("$script:dragNear -or" in BADGE or "-or $script:dragNear" in BADGE,
       "and keeps its frame rate up while it happens, so the movement eases rather than steps")
 
@@ -109,6 +109,24 @@ check("$script:dragNear -or" in BADGE or "-or $script:dragNear" in BADGE,
 check(re.search(r"\$dropReorder = \{(?:.|\n)*?WriteAllText\(\$script:ordMarker", BADGE),
       "releasing still writes the order to disk")
 print("wiring: one calculation for preview and drop, published while moving, read only when it is")
+
+# -- 4. the cadence split that made the drag smooth ------------------------------------------------
+# Opening a file costs ~135us on Windows however small it is, so re-reading every slot at 600ms was
+# most of what an idle dock cost - and that cost lands on the same thread that has to paint the drag.
+# Beat often, re-read rarely, notice a new or departed tab by the directory's own timestamp.
+check("function Stack-Write" in common, "a badge can publish its slot without reading the others")
+check("function Stack-DirStamp" in common, "and can tell whether the set of tabs changed for one stat")
+check(re.search(r"Stack-Write \(SlotHeight\)(?:.|\n){0,600}?Stack-DirStamp", BADGE),
+      "the poll beats every pass and gates the full read on the directory stamp")
+check(re.search(r"\$stamp -ne \$script:lastStamp -or \(\$nowMs - \$script:lastFullRead\) -ge \d+", BADGE),
+      "with a time fallback, so an ord or height changing inside a file is still noticed")
+# Reading and writing must stay separable, or the drag path would rewrite every badge's slot per frame.
+check(re.search(r"function Stack-Peek", common), "reading the order is its own operation")
+check("ReadDir" in common and "public static string[] ReadDir" in common,
+      "and the slot walk is one compiled call rather than a PowerShell call per file")
+check("function Read-TextShared($path) { return [PerPixelLayered]::ReadText($path) }" in common,
+      "shared reads go straight to the compiled helper")
+print("cadence: beat every pass, full read on change or every few seconds")
 
 import shutil                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
