@@ -35,7 +35,7 @@ watches Claude Code's hooks and draws a small always-on-top UI.
 | **Jump / stow (drawer)** | Left-click a badge to jump to that chat's VS Code window. **Right-click stows it** — the tab slides into a drawer at the right edge, leaving just its colored edge showing; it's never destroyed. **Click the stowed edge (either button) to slide it back out.** **Drag a tab up or down to reorder the stack** — the others slide out of the way while you're still holding it, so you can see where it will land before you commit, and the order sticks. The drawer state and order are remembered across restarts. Hover a badge (or the button) for a hint on what the clicks do. |
 | **Window color-coding** | The focused chat's VS Code window gets a matching color accent along its top edge — in the colour of the chat that window is **currently showing**, so a window holding several chats re-tints as you switch between them rather than being stuck on whichever one sorted first. |
 | **Readable colors** | Each chat's accent is its tab's *text*, on a near-black chip, so hue alone can't be the whole story: at full saturation a blue sits at ~2:1 contrast against that chip while a yellow is ~13:1. Colors are stepped toward white until they clear WCAG AA (4.5:1), so dark hues arrive as pastels and already-bright ones are left untouched — distinct *and* legible. |
-| **Session usage meter** | A meter above the tab stack showing **how much of your 5-hour session window you have spent** — the real figure from your plan, the same number the usage page in the browser shows, not a local estimate. The session bar is the headline, with **the percentage and how long is left in the window** beside it (`29% / 5h35m`), because that is the limit you actually hit during a day's work; a **thinner, dimmer bar underneath tracks the weekly window**, which is rarely the binding constraint but worth seeing creep up. The session bar is coloured by **where the window is heading rather than how full it is** — how full it is is what the bar's length already says. See [burn rate](#burn-rate-what-the-colour-means). The weekly bar keeps the plain thresholds: green, amber past 60%, red past 85%. Both go **grey when the reading has gone stale**. Hover for both percentages, when each window rolls over, and what the burn rate projects. The countdown ticks down each minute, and disappears when the reading is stale, because a countdown from an old reading is a guess. |
+| **Session usage meter** | A meter above the tab stack showing **how much of your 5-hour session window you have spent** — the real figure from your plan, the same number the usage page in the browser shows, not a local estimate. The session bar is the headline, with **the percentage and how long is left in the window** beside it (`29% / 5h35m`), because that is the limit you actually hit during a day's work; a **thinner, dimmer bar underneath tracks the weekly window**, which is rarely the binding constraint but worth seeing creep up. The session bar is coloured by **where the window is heading rather than how full it is** — how full it is is what the bar's length already says. See [burn rate](#burn-rate-what-the-colour-means). The weekly bar keeps the plain thresholds: green, amber past 60%, red past 85%. Both go **grey when the reading has gone stale**. Hover for both percentages, when each window rolls over, and what the burn rate projects. The countdown ticks down each minute, and disappears when the reading is stale, because a countdown from an old reading is a guess. **Click the bars** for a detail panel: the burn rate, tokens a minute, where the window lands, the weekly window, and the last twenty minutes at a size you can read. Click again, or anywhere else, to dismiss. |
 | **On/off toggle** | Turn the whole HUD off and back on from a **VS Code status-bar button** — a companion extension in [`vscode-extension/`](vscode-extension/) (green = on, dim = off). When off, the badges/tint/button/cards all disappear; flip it back on and they return. (Under the hood it's a `enabled` flag in the config, so you can also toggle it by hand or from your own script.) |
 | **"Working on" cards** | A top-right card per chat, colored to that chat, showing its name and **a short summary of what it's doing** (e.g. *"fixing sim landing crash"*, *"adding servos to schematic"*) — it stays up while the chat works and turns to a brief **done** when it finishes. Hover for a hint; clicking it jumps to that chat exactly as its tab does — the right window **and** the right tab inside it. |
 | **"Needs you" popup** | When a background session goes **awaiting your input**, an always-on-top card (colored to match that session) slides in top-right — **left-click to jump** straight into that chat (its window, and its tab within it), **right-click to dismiss**. It's one we draw ourselves, so Windows notification settings / Focus Assist can't suppress it. Off-Windows it falls back to a native desktop toast. |
@@ -175,6 +175,30 @@ That endpoint is not a documented API and could change; if it does, the meter go
 wrong. When a request fails the retry backs off — doubling from a minute up to ten — so an expired
 token or a rate limit costs one request every so often instead of one every few seconds. Set
 `usage_meter: false` to turn the whole thing off.
+
+### Tokens a minute
+
+The plan's percentage only moves in whole points, so between readings it tells you nothing — and the
+burn rate fitted to it needs five minutes before it says anything at all. The transcripts have the
+real numbers, per message, with timestamps, and they're already on disk, so the detail panel also
+shows a **tokens-per-minute** figure tailed straight from them.
+
+It is deliberately not a raw token count. Three corrections make the difference between a number and
+a decoration:
+
+- Assistant records **repeat their usage block once per content block** — on a live transcript here,
+  1779 records for 840 actual calls. Counted once, keyed on the message id.
+- **Sub-agent spend lives in a separate file tree**, and on a busy chat it is larger than the main
+  transcript. Both are walked.
+- No raw total tracks what the plan actually charges. A turn can emit 1,200 tokens while re-sending
+  half a million cached ones — output alone calls that nothing. The figure is **cost-weighted**, in
+  the shape of the price list: an output token counts five, a fresh input token one, a cache read a
+  tenth. That version tracks the plan's own utilization closely; the raw ones are out by 5–14×.
+
+The files are megabytes and grow all day, so they're **tailed, never re-read**: each one's read
+offset is remembered, only new bytes are parsed, a record still being written is left for next time,
+and a file that has shrunk is treated as a new file rather than a rewind. Steady-state cost is about
+35ms every five seconds, in the daemon, off your editor's thread.
 
 ### Burn rate: what the colour means
 

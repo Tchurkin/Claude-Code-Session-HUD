@@ -21,6 +21,7 @@ import glob, json, os, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hal_common as hc
 import hal_badge as hb
+import hal_tokens
 import hal_usage
 
 # Claude Code's own state dir (relocatable via CLAUDE_CONFIG_DIR), where it registers sessions.
@@ -428,6 +429,13 @@ def reconcile():
                             branch_show=_branch_shows(live).get(sid, False))
 
     if cfg.get("usage_meter", True):
+        # Tokens come from the transcripts, so they cost nothing but disk and can be far fresher
+        # than the plan's own figure - which is why they live in their own file on their own clock.
+        if _IS_DAEMON:
+            try:
+                hal_tokens.refresh()         # self-throttled to 5s; ~35ms of tailing
+            except Exception:
+                pass
         u = hal_usage.refresh(active=busy)   # 45s while a chat is running, 4 min while nothing is
         # Only the daemon raises it. reconcile() also runs inline inside every hook, and two
         # processes reading `pace_alert` before either clears it would chime twice; there is exactly

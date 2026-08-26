@@ -85,6 +85,12 @@ public class PerPixelLayered {
     public static bool IsTopmost(IntPtr h){ return (GetWindowLong(h, GWL_EXSTYLE) & 0x8) != 0; }
     // Make THIS window a click-through overlay (layered + transparent + no-activate + no taskbar).
     public static void InitClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x20|0x08000000|0x80); MakeTopmost(h); }
+    // Clickable overlay: layered + no-activate + out of alt-tab, but WITHOUT WS_EX_TRANSPARENT.
+    // Dropping only 0x20 is the whole difference between an overlay you can click and one you
+    // cannot - WS_EX_NOACTIVATE is a separate bit and is what keeps focus in the editor either way.
+    // Hit-testing then falls to the layered surface's alpha, so only the pixels actually drawn take
+    // a click and the transparent canvas around them still passes clicks straight through.
+    public static void InitClickable(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x08000000|0x80); MakeTopmost(h); }
     // Add click-through WITHOUT forcing WS_EX_LAYERED (for Form.Opacity overlays that manage layering themselves).
     public static void AddClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x20|0x08000000|0x80); MakeTopmost(h); }
     // Don't steal foreground when shown/clicked (WS_EX_NOACTIVATE) - so notification popups

@@ -10,8 +10,12 @@ param(
 # Both come from the real figures Claude reports (hal_usage.py), not a local estimate, and both grey
 # out when the reading has gone stale rather than showing an old number as though it were current.
 #
-# Click-through: this is a readout, not a control, so it never intercepts a click. The hover hint
-# still works, because hover is detected by polling the cursor rather than by mouse events.
+# The bars are a button: clicking them opens a detail panel above the stack with the numbers the
+# bars cannot carry - the burn rate, tokens a minute, where the window lands, and the last twenty
+# minutes at a readable size. Only the drawn pixels take a click (a layered window is hit-tested
+# against its alpha), and the window never takes focus, so the editor keeps the caret. Hover is
+# still found by polling the cursor rather than by mouse events - the hint the meter draws is
+# itself opaque, so enter/leave events would chase their own tail.
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -55,6 +59,7 @@ $script:histSig = ""       # cheap "has the history changed" key
 $script:pace = -1.0        # 0 coasting .. 0.5 lands on the limit .. 1 runs out at once (-1 unknown)
 $script:projected = -1     # where the session lands at reset, at the current burn
 $script:hitMins = -1       # minutes until the limit at the current burn
+$script:burn = -1.0        # utilization points per minute
 $script:lastUsage = 0; $script:lastStack = 0; $script:lastPresence = 0
 $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
@@ -69,6 +74,7 @@ $form.Left   = $screen.Right - $UW - 16 - $GLOW - $TIP_W     # right edge lines 
 
 $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
 $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.json"
+$tokensFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "tokens.json"
 $dockBottom = $screen.Bottom - 44                  # above VS Code's status bar
 $GAPB = 8
 $script:curTop    = $dockBottom - $CONTENT_H - $GLOW
@@ -115,6 +121,12 @@ function StackHeight {
 # It now lives in popup_common.ps1 (Ensure-HudDaemon), where the badges and the tint can reach it
 # too - so the daemon is watched by everything on screen rather than by one process that the daemon
 # was in turn the only watcher of.
+
+function Over-Bar {
+    $cp = [System.Windows.Forms.Cursor]::Position
+    $mx = $form.Left + $GLOW + $OX; $my = $script:lastTop + $GLOW
+    return ($cp.X -ge $mx -and $cp.X -lt ($mx + $UW) -and $cp.Y -ge $my -and $cp.Y -lt ($my + $CONTENT_H))
+}
 
 function RoundedPath($x, $y, $w, $h, $rad) {
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -391,7 +403,258 @@ $render = {
     $bmp.Dispose()
 }
 
-$form.Add_Shown({ [PerPixelLayered]::InitClickThrough($form.Handle); Assert-Topmost $form; & $render })
+# ── the detail panel ───────────────────────────────────────────────────────────────────────────
+# Click the meter and this opens above it: the same numbers the bars encode, plus the ones they
+# cannot - how fast tokens are actually going out, where the window lands, and the shape of the last
+# twenty minutes at a size you can read.
+#
+# A second Form in this process rather than another overlay script. Application.Run pumps the
+# THREAD, so a second borderless form on it is driven by the same loop, dies with its owner, and -
+# the reason that matters - can just read $script:sessionPct and friends, which are already
+# refreshed here every two seconds. A separate process would have to duplicate the whole formatting
+# layer, invent a protocol to follow a window that eases every frame, and pay a PowerShell cold
+# start on every click.
+$PANEL_W = 360; $PANEL_H = 260; $PGLOW = 14; $PAD = 16; $COL = 328
+$PSPARK_W = 328; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
+$fHero  = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
+$fBig   = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+$fVal   = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$fBody  = New-Object System.Drawing.Font("Segoe UI", 9)
+$fEye   = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Bold)
+$fMicro = New-Object System.Drawing.Font("Segoe UI", 8)
+$DIM    = [System.Drawing.Color]::FromArgb(150,150,158)
+$DIMMER = [System.Drawing.Color]::FromArgb(128,128,136)
+$INK    = [System.Drawing.Color]::FromArgb(237,237,241)
+$INKHI  = [System.Drawing.Color]::FromArgb(244,244,248)
+
+$script:panelOpen = $false
+$script:tpm = -1; $script:opm = -1        # weighted tokens/min, output tokens/min
+$script:lbWas = $false                    # left button state last tick, for click-away
+
+$panel = New-Object System.Windows.Forms.Form
+$panel.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+$panel.StartPosition   = [System.Windows.Forms.FormStartPosition]::Manual
+$panel.ShowInTaskbar   = $false
+$panel.TopMost         = $true
+$panel.Width = $PANEL_W + $PGLOW*2; $panel.Height = $PANEL_H + $PGLOW*2
+$panel.Left = -20000; $panel.Top = -20000          # off-screen until first opened
+$panel.Add_HandleCreated({ [PerPixelLayered]::NoActivate($panel.Handle) })
+
+# Plain English for the colour. The bands are the ramp's own corners, so the words and the hue can
+# never disagree about which side of "you will run out" you are on.
+function PaceWords($p, $proj, $hit) {
+    if ($p -lt 0) { return "Not enough readings yet to say." }
+    if ($p -gt 0.5) {
+        if ($hit -ge 0) { return "Running out early - limit in about $(MinsLong $hit)." }
+        return "Running out before this window resets."
+    }
+    if ($p -ge 0.42) { return "Right on the line - set to use just about all of it." }
+    if ($proj -ge 0) { return "Coasting - on pace for $proj% by reset." }
+    return "Coasting."
+}
+
+function Fmt-Count($n) {
+    if ($n -lt 0) { return "-" }
+    if ($n -ge 1000000) { return "{0:N1}M" -f ($n / 1000000.0) }
+    if ($n -ge 1000)    { return "{0:N0}k" -f ($n / 1000.0) }
+    return "$n"
+}
+
+$renderPanel = {
+    $bmp = New-Object System.Drawing.Bitmap(($PANEL_W + $PGLOW*2), ($PANEL_H + $PGLOW*2),
+                                            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $ox = $PGLOW; $oy = $PGLOW                       # panel-local (0,0) in bitmap coords
+
+    $chip = RoundedPath $ox $oy $PANEL_W $PANEL_H 8
+    $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246,26,26,28))
+    $g.FillPath($bg, $chip); $bg.Dispose()
+    $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120,200,200,210)), 1
+    $g.DrawPath($pen, $chip); $pen.Dispose(); $chip.Dispose()
+
+    $sp = [Math]::Max(0, $script:sessionPct)
+    $accent = if ($script:pace -ge 0) { PaceColor $script:pace $script:stale }
+              else { BarColor $sp $script:stale }
+    $L = $ox + $PAD; $R = $ox + $PANEL_W - $PAD
+
+    function TxtL($s, $f, $c, $x, $inkTop) {
+        $b = New-Object System.Drawing.SolidBrush $c
+        $g.DrawString($s, $f, $b, [float]$x, [float]($oy + $inkTop - 3)); $b.Dispose()
+    }
+    function TxtR($s, $f, $c, $xr, $inkTop) {
+        $w = [int][Math]::Ceiling($g.MeasureString($s, $f).Width)
+        $b = New-Object System.Drawing.SolidBrush $c
+        $g.DrawString($s, $f, $b, [float]($xr - $w + 3), [float]($oy + $inkTop - 3)); $b.Dispose()
+    }
+
+    # header
+    TxtL "SESSION - 5 HOURS" $fEye $DIM $L 12
+    $age = if ($script:stale) { "reading is stale" } else { "" }
+    if ($age) { TxtR $age $fMicro ([System.Drawing.Color]::FromArgb(240,80,70)) $R 12 }
+
+    # the one number a glance should land on
+    Draw-OutlinedText $g "$sp" $fHero $INKHI ($L) ($oy + 30) 3 'left'
+    $hw = [int][Math]::Ceiling($g.MeasureString("$sp", $fHero).Width)
+    Draw-OutlinedText $g "%" $fBig $INKHI ($L + $hw - 4) ($oy + 46) 2 'left'
+    TxtR "resets in" $fMicro $DIM $R 34
+    $left = if ($script:stale) { "-" } else { ResetIn $script:sessionResets }
+    if (-not $left) { $left = "-" }
+    Draw-OutlinedText $g $left $fBig $INK $R ($oy + 46) 2 'right'
+
+    # the bar, with a ghost showing where the burn lands it by reset
+    $trk = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(215,38,38,42))
+    $bar = RoundedPath $L ($oy + 68) $COL 10 5
+    $g.FillPath($trk, $bar); $trk.Dispose()
+    if ($script:projected -gt $sp -and -not $script:stale) {
+        $gw = [int]($COL * [Math]::Min(100, $script:projected) / 100.0)
+        if ($gw -gt 0) {
+            $gb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(70, $accent.R, $accent.G, $accent.B))
+            $old = $g.Clip; $g.SetClip($bar)
+            $g.FillRectangle($gb, $L, ($oy + 68), $gw, 10); $gb.Dispose(); $g.Clip = $old
+        }
+    }
+    $fw = [int]($COL * [Math]::Min(100, $sp) / 100.0)
+    if ($fw -gt 0) {
+        $fb = New-Object System.Drawing.SolidBrush $accent
+        $old = $g.Clip; $g.SetClip($bar)
+        $g.FillRectangle($fb, $L, ($oy + 68), $fw, 10); $fb.Dispose(); $g.Clip = $old
+    }
+    $bar.Dispose()
+
+    # what that means, in words
+    $db = New-Object System.Drawing.SolidBrush $accent
+    $g.FillEllipse($db, [float]$L, [float]($oy + 89), 7, 7); $db.Dispose()
+    TxtL (PaceWords $script:pace $script:projected $script:hitMins) $fBody $INK ($L + 13) 87
+
+    $hair = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(30,200,200,210)), 1
+    $g.DrawLine($hair, $L, ($oy + 113), $R, ($oy + 113))
+    $g.DrawLine($hair, $L, ($oy + 152), $R, ($oy + 152))
+    $hair.Dispose()
+
+    # weekly: rarely the binding limit, so it gets a line and a sliver
+    TxtL "WEEKLY" $fEye $DIM $L 122
+    if ($script:weeklyPct -ge 0) {
+        $wIn = ResetIn $script:weeklyResets
+        $wtxt = if ($wIn) { "$($script:weeklyPct)%   -   $wIn" } else { "$($script:weeklyPct)%" }
+        TxtR $wtxt $fBody ([System.Drawing.Color]::FromArgb(188,188,196)) $R 122
+        $wt = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(215,38,38,42))
+        $wbar = RoundedPath $L ($oy + 136) $COL 5 2
+        $g.FillPath($wt, $wbar); $wt.Dispose()
+        $ww = [int]($COL * [Math]::Min(100, $script:weeklyPct) / 100.0)
+        if ($ww -gt 0) {
+            $wc = BarColor $script:weeklyPct $script:stale
+            $wb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(170, $wc.R, $wc.G, $wc.B))
+            $old = $g.Clip; $g.SetClip($wbar)
+            $g.FillRectangle($wb, $L, ($oy + 136), $ww, 5); $wb.Dispose(); $g.Clip = $old
+        }
+        $wbar.Dispose()
+    }
+
+    # three numbers, evenly spaced: what it costs now, what it costs in tokens, where it ends up
+    $cw = 104; $c1 = $L; $c2 = $L + 112; $c3 = $L + 224
+    TxtL "BURN"     $fEye $DIM $c1 161
+    TxtL "TOKENS"   $fEye $DIM $c2 161
+    TxtL "AT RESET" $fEye $DIM $c3 161
+    $burnTxt = if ($script:burn -ge 0) { "{0:N2}" -f $script:burn } else { "-" }
+    Draw-OutlinedText $g $burnTxt $fVal $INK $c1 ($oy + 172) 1.5 'left'
+    $bwid = [int][Math]::Ceiling($g.MeasureString($burnTxt, $fVal).Width)
+    TxtL "%/min" $fMicro $DIMMER ($c1 + $bwid - 2) 176
+    $tokTxt = if ($script:tpm -ge 0) { Fmt-Count $script:tpm } else { "-" }
+    Draw-OutlinedText $g $tokTxt $fVal $INK $c2 ($oy + 172) 1.5 'left'
+    $twid = [int][Math]::Ceiling($g.MeasureString($tokTxt, $fVal).Width)
+    TxtL "/min" $fMicro $DIMMER ($c2 + $twid - 2) 176
+    $projTxt = if ($script:projected -ge 0 -and -not $script:stale) { "$($script:projected)%" } else { "-" }
+    Draw-OutlinedText $g $projTxt $fVal $accent $c3 ($oy + 172) 1.5 'left'
+
+    # the last twenty minutes, big enough to read
+    TxtL "LAST 20 MIN" $fEye $DIM $L 194
+    $h = @($script:hist)
+    if ($h.Count -ge $SPARK_MIN) {
+        $lo = 1000.0; $hi = -1.0
+        foreach ($p in $h) { $v = [double]$p[1]; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
+        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R 194
+        Draw-Spark2 $g $h $L ($oy + 206) $PSPARK_W $PSPARK_H $accent
+    } else {
+        TxtL "not enough readings yet" $fMicro $DIMMER ($L + 96) 194
+    }
+
+    $g.Dispose()
+    [PerPixelLayered]::SetBitmap($panel.Handle, $bmp, $panel.Left, $panel.Top, 255)
+    $bmp.Dispose()
+}
+
+# The panel's chart. Same normalisation as the meter's, but wider, with the area under the line
+# filled - at 42px tall the shape reads better as a mass than as a stroke - and a marked "now".
+function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col) {
+    $n = @($hist).Count
+    if ($n -lt 2) { return }
+    try {
+        $ts = New-Object 'double[]' $n; $us = New-Object 'double[]' $n
+        for ($i = 0; $i -lt $n; $i++) { $ts[$i] = [double]$hist[$i][0]; $us[$i] = [double]$hist[$i][1] }
+        $f = SparkNorm $us $PSPARK_MIN_SPAN
+        $t0 = $ts[0]; $dt = $ts[$n-1] - $t0
+        $pts = New-Object 'System.Drawing.PointF[]' $n
+        for ($i = 0; $i -lt $n; $i++) {
+            $fx = if ($dt -le 0) { $i / [double]($n - 1) } else { ($ts[$i] - $t0) / $dt }
+            $pts[$i] = [System.Drawing.PointF]::new([single]($x + $fx * ($w - 1)),
+                                                    [single]($y + ($h - 1) - $f[$i] * ($h - 1)))
+        }
+        $poly = New-Object 'System.Drawing.PointF[]' ($n + 2)
+        for ($i = 0; $i -lt $n; $i++) { $poly[$i] = $pts[$i] }
+        $poly[$n]     = [System.Drawing.PointF]::new([single]($x + $w - 1), [single]($y + $h))
+        $poly[$n + 1] = [System.Drawing.PointF]::new([single]$x, [single]($y + $h))
+        $fill = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(30, $col.R, $col.G, $col.B))
+        $g.FillPolygon($fill, $poly); $fill.Dispose()
+        $pen = New-Object System.Drawing.Pen $col, 1.8
+        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        $g.DrawLines($pen, $pts); $pen.Dispose()
+        $ring = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,26,26,28))
+        $g.FillEllipse($ring, [single]($pts[$n-1].X - 5), [single]($pts[$n-1].Y - 5), 10, 10); $ring.Dispose()
+        $dot = New-Object System.Drawing.SolidBrush $col
+        $g.FillEllipse($dot, [single]($pts[$n-1].X - 3.5), [single]($pts[$n-1].Y - 3.5), 7, 7); $dot.Dispose()
+    } catch { }
+}
+
+# Sits directly above the meter, right edges aligned, clamped on screen.
+function PanelPlace {
+    $barR = $form.Left + $GLOW + $OX + $UW
+    $panel.Left = [int]($barR - $PANEL_W - $PGLOW)
+    $t = [int]($script:lastTop + $GLOW - 8 - $PANEL_H - $PGLOW)
+    if ($t -lt 4) { $t = 4 }
+    $panel.Top = $t
+}
+
+$openPanel = {
+    try {
+        PanelPlace
+        $script:panelOpen = $true
+        $panel.Show()
+        [PerPixelLayered]::InitClickable($panel.Handle)   # after Show: it drops TOPMOST, so re-assert
+        Assert-Topmost $panel
+        & $renderPanel
+    } catch { $script:panelOpen = $false }
+}
+$closePanel = {
+    $script:panelOpen = $false
+    try { $panel.Hide() } catch {}
+}
+
+$form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })   # focus stays in the editor
+$form.Add_Shown({ [PerPixelLayered]::InitClickable($form.Handle); Assert-Topmost $form; & $render })
+# The meter is a button now. Only the drawn pixels are clickable - a layered window is
+# hit-tested against its alpha - but the hover hint is drawn pixels too, so gate on the bar.
+$form.Add_MouseDown({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    if (-not (Over-Bar)) { return }
+    $script:lbWas = $true            # this press must not also read as a click-away
+    if ($script:panelOpen) { & $closePanel } else { & $openPanel }
+})
 
 $script:lastVs = NowMs
 $timer = New-Object System.Windows.Forms.Timer
@@ -412,7 +675,7 @@ $timer.Add_Tick({
         $script:lastUsage = $nowMs
         $j = Read-JsonFile $usageFile
         $s = -1; $w = -1; $sr = ""; $wr = ""; $st = $false
-        $pc = -1.0; $pj = -1; $hm = -1; $hs = @()
+        $pc = -1.0; $pj = -1; $hm = -1; $hs = @(); $bn = -1.0
         if ($j) {
             if ($null -ne $j.session_pct) { $s = [int]$j.session_pct; $sr = [string]$j.session_resets }
             if ($null -ne $j.weekly_pct)  { $w = [int]$j.weekly_pct;  $wr = [string]$j.weekly_resets }
@@ -422,6 +685,7 @@ $timer.Add_Tick({
             try { if ($null -ne $j.pace)      { $pc = [double]$j.pace } }     catch { $pc = -1.0 }
             try { if ($null -ne $j.projected) { $pj = [int]$j.projected } }   catch { $pj = -1 }
             try { if ($null -ne $j.hit_mins)  { $hm = [int]$j.hit_mins } }    catch { $hm = -1 }
+            try { if ($null -ne $j.burn)      { $bn = [double]$j.burn } }     catch { $bn = -1.0 }
             # The readings behind the burn rate, for the sparkline. Guard the null explicitly:
             # @($null).Count is 1 in PowerShell 5.1, so the usual @(...) idiom would report one
             # phantom sample and the draw would then die indexing into it.
@@ -437,18 +701,31 @@ $timer.Add_Tick({
         $hsig = ""
         if ($hs.Count -gt 0) { $hsig = "$($hs.Count):$($hs[$hs.Count - 1][0])" }
         $script:hist = $hs
+        # Tokens come from the transcripts on their own, much faster clock, so they are their own
+        # file and their own staleness - a frozen OAuth reading does not make them wrong.
+        $tp = -1; $op = -1
+        $tj = Read-JsonFile $tokensFile
+        if ($tj) {
+            try { if (($nowMs - [int64]$tj.ts) -lt 60000) { $tp = [int]$tj.tpm; $op = [int]$tj.opm } } catch {}
+        }
+        if ($tp -ne $script:tpm -or $op -ne $script:opm) {
+            $script:tpm = $tp; $script:opm = $op
+            if ($script:panelOpen) { try { & $renderPanel } catch {} }
+        }
         $left = if ($st) { "" } else { ResetShort $sr }     # a stale reading has no honest countdown
         if ($s -ne $script:sessionPct -or $w -ne $script:weeklyPct -or $st -ne $script:stale -or
             $sr -ne $script:sessionResets -or $wr -ne $script:weeklyResets -or
             $left -ne $script:sessionLeft -or $pc -ne $script:pace -or
-            $pj -ne $script:projected -or $hm -ne $script:hitMins -or
+            $pj -ne $script:projected -or $hm -ne $script:hitMins -or $bn -ne $script:burn -or
             ($script:hot -and $hsig -ne $script:histSig)) {   # a chart nobody is looking at can wait
             $script:histSig = $hsig
             $script:sessionPct = $s; $script:weeklyPct = $w; $script:stale = $st
             $script:sessionResets = $sr; $script:weeklyResets = $wr
             $script:sessionLeft = $left
             $script:pace = $pc; $script:projected = $pj; $script:hitMins = $hm
+            $script:burn = $bn
             & $render
+            if ($script:panelOpen) { try { & $renderPanel } catch {} }
         }
     }
 
@@ -460,10 +737,27 @@ $timer.Add_Tick({
     }
     if ($nowMs - $script:lastDaemon -ge 3000) { $script:lastDaemon = $nowMs; Ensure-HudDaemon; Assert-Topmost $form }
 
-    $cp = [System.Windows.Forms.Cursor]::Position
-    $mx = $form.Left + $GLOW + $OX; $my = $script:lastTop + $GLOW
-    $over = ($cp.X -ge $mx -and $cp.X -lt ($mx + $UW) -and $cp.Y -ge $my -and $cp.Y -lt ($my + $CONTENT_H))
+    $over = Over-Bar
     if ($over -ne $script:hot) { $script:hot = $over; & $render }
+
+    # The panel rides above the meter, which itself eases as the tab stack changes height, so it has
+    # to follow. Click anywhere that is neither the button nor the panel and it goes away; the press
+    # that opened it is marked so the same press cannot immediately close it again.
+    $lb = ([System.Windows.Forms.Control]::MouseButtons -band [System.Windows.Forms.MouseButtons]::Left) -ne 0
+    if ($script:panelOpen) {
+        try {
+            $wasL = $panel.Left; $wasT = $panel.Top
+            PanelPlace
+            if ($panel.Left -ne $wasL -or $panel.Top -ne $wasT) { & $renderPanel }
+        } catch {}
+        if ($lb -and -not $script:lbWas) {
+            $cp = [System.Windows.Forms.Cursor]::Position
+            $inP = ($cp.X -ge ($panel.Left + $PGLOW) -and $cp.X -lt ($panel.Left + $PGLOW + $PANEL_W) -and
+                    $cp.Y -ge ($panel.Top + $PGLOW)  -and $cp.Y -lt ($panel.Top + $PGLOW + $PANEL_H))
+            if (-not $inP -and -not $over) { & $closePanel }
+        }
+    }
+    $script:lbWas = $lb
 
     $delta = $script:targetTop - $script:curTop
     if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:targetTop } else { $script:curTop += $delta * 0.22 }
@@ -474,7 +768,7 @@ $timer.Add_Tick({
         [PerPixelLayered]::Move($form.Handle, $form.Left, $newTop)
     }
 
-    $want = if (([Math]::Abs($script:targetTop - $script:curTop) -ge 0.5) -or $script:hot) { 30 } else { 200 }
+    $want = if (([Math]::Abs($script:targetTop - $script:curTop) -ge 0.5) -or $script:hot -or $script:panelOpen) { 30 } else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
     if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }
 })
