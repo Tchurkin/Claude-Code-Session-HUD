@@ -147,6 +147,13 @@ cd Claude-Code-Session-HUD
 Needs a `python` on PATH for the hooks (no third-party packages). Reload Claude Code so the
 hooks load. Tab names work out of the box via your Claude Code login — no API key needed.
 
+**What you need:** Windows for the tabs, meter and tint; Python on PATH; Claude Code logged in.
+The desktop notification that tells you a session needs you works on macOS and Linux too, but the
+on-screen parts are Win32 and will simply not appear elsewhere. The
+[VS Code companion](vscode-extension/) is optional — without it a tab still jumps to the right
+window, just not to the right chat inside it. Everything else works on a machine that has never run
+this before: there is nothing to configure, and the first hook creates what it needs.
+
 ## Updating
 
 Plugins don't auto-update from a plain push — Claude Code delivers a new version only when

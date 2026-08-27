@@ -2,10 +2,24 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "claude-session-hud",
   "displayName": "Claude Session HUD",
-  "version": "0.14.2",
-  "description": "An ambient heads-up display for running many Claude Code sessions at once. Each session gets a persistent, distinctly-colored badge showing its live state (working / done / awaiting your input) and a Claude-generated name of what it's working on. When a background session needs you, an always-on-top popup pushes it to you (native desktop notification off-Windows); click a badge to jump to that session's window, and the focused window gets a matching color accent. Badges/tint/popup are Windows; notifications are cross-platform.",
-  "author": { "name": "Braxton Herold" },
+  "version": "0.15.0",
+  "description": "An ambient heads-up display for running many Claude Code sessions at once. Every open chat gets a persistent, distinctly-coloured tab showing its live state - working, done, asking you a question, or blocked on you - named by Claude for the area of work it covers. Click one to jump straight to that chat's tab in the right window. A meter above the stack shows how much of your 5-hour session window you have spent, coloured by whether your current burn will run it out before it resets, with a detail panel for the burn rate, tokens a minute, which chat is spending them, and the shape of the session so far. Tabs can be reordered, stowed, and slid off the screen entirely from a handle at the edge. Tabs, meter and tint are Windows; the 'a session needs you' notification is cross-platform.",
+  "author": {
+    "name": "Braxton Herold"
+  },
   "repository": "https://github.com/Tchurkin/Claude-Code-Session-HUD",
   "license": "MIT",
-  "keywords": ["claude-code", "hud", "hooks", "multi-session", "parallel-agents", "worktrees", "notifications", "windows"]
+  "keywords": [
+    "claude-code",
+    "hud",
+    "hooks",
+    "multi-session",
+    "parallel-agents",
+    "worktrees",
+    "notifications",
+    "windows",
+    "usage",
+    "session-limits",
+    "tokens"
+  ]
 }

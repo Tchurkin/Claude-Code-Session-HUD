@@ -1,12 +1,14 @@
 {
   "name": "session-hud",
-  "owner": { "name": "Braxton Herold" },
-  "description": "Ambient HUD for running multiple Claude Code sessions at once.",
+  "owner": {
+    "name": "Braxton Herold"
+  },
+  "description": "Ambient HUD for running many Claude Code sessions at once: a tab per chat, and a meter for what the session window has left.",
   "plugins": [
     {
       "name": "claude-session-hud",
       "source": "./plugins/hal-voice",
-      "description": "Distinctly-colored per-session badges (working / done / awaiting you), a 'needs you' popup when a background session is blocked, window color-coding, and click-to-jump — see and steer all your parallel Claude Code sessions at a glance."
+      "description": "An ambient heads-up display for running many Claude Code sessions at once. Every open chat gets a persistent, distinctly-coloured tab showing its live state - working, done, asking you a question, or blocked on you - named by Claude for the area of work it covers. Click one to jump straight to that chat's tab in the right window. A meter above the stack shows how much of your 5-hour session window you have spent, coloured by whether your current burn will run it out before it resets, with a detail panel for the burn rate, tokens a minute, which chat is spending them, and the shape of the session so far. Tabs can be reordered, stowed, and slid off the screen entirely from a handle at the edge. Tabs, meter and tint are Windows; the 'a session needs you' notification is cross-platform."
     }
   ]
 }
