@@ -66,13 +66,17 @@ $script:slide = 0.0        # how far the dock has slid off to the right
 $script:lastSlide = -1.0
 $script:lastUsage = 0; $script:lastStack = 0; $script:lastPresence = 0
 $script:lastDaemon = 0; $script:lastBeat = 0; $script:curInterval = 200
-$script:lastFrame = 0
 # What the readout currently occupies, in canvas coords - set by the render, read by Over-Bar.
 $script:hitL = 0; $script:hitR = 0
 $script:inferred = $false  # the window rolled over while we could not ask: worked out, not read
 $script:liveUtil = -1.0    # the reading carried forward with locally measured spend
 $script:byChat = @()       # which chats are spending it: @(@(sid8, weightedPerMin), ...)
 $script:long = @()         # the whole window's readings, for the panel's chart
+$script:err = ""           # why the last fetch failed: auth | rate | net
+$script:nextTry = 0        # when it will try again
+$script:readingTs = 0      # when the reading we are showing was actually taken
+$script:weeklyProj = -1    # where the week lands at the rate so far
+$script:weeklyHit = 0      # ... and when it would run out, if it would
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -346,6 +350,26 @@ $panel.Add_HandleCreated({ [PerPixelLayered]::NoActivate($panel.Handle) })
 
 # Plain English for the colour. The bands are the ramp's own corners, so the words and the hue can
 # never disagree about which side of "you will run out" you are on.
+# Why the reading is not current, in the same slot the pace verdict uses. The HUD knew all of this
+# already - which failure, how long until the next attempt - and made you go and read a cache file
+# to find out. Every one of these is a state the data distinguishes; none of them is a guess.
+function StateWords {
+    $inS = ""
+    if ($script:nextTry -gt 0) {
+        $secs = [int][Math]::Ceiling(($script:nextTry - (NowMs)) / 1000.0)
+        if ($secs -gt 0) { $inS = " - retrying in $(MinsLong ([int][Math]::Ceiling($secs / 60.0)))" }
+    }
+    if ($script:inferred) { return "New window - nothing spent in it yet." }
+    if (-not $script:stale) { return "" }
+    switch ($script:err) {
+        "auth" { return "Signed out - renews the next time you use Claude." }
+        "rate" { return "Rate limited$inS." }
+        "net"  { return "Can't reach the endpoint$inS." }
+    }
+    $age = [int][Math]::Floor(((NowMs) - $script:readingTs) / 60000.0)
+    return "Last known reading, $(MinsLong $age) old."
+}
+
 function PaceWords($p, $proj, $hit) {
     if ($p -lt 0) { return "Not enough readings yet to say." }
     if ($p -gt 0.5) {
@@ -378,6 +402,15 @@ function Chat-Meta($sid) {
     } catch { }
     $script:chatMeta[$sid] = $m
     return $m
+}
+
+# "Thu", or "Thu 4th" if it is more than a week out - a weekday alone would be ambiguous.
+function Day-Of($ms) {
+    try {
+        $d = [System.DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ms).LocalDateTime
+        if (($d - [datetime]::Now).TotalDays -ge 6) { return $d.ToString("ddd d MMM") }
+        return $d.ToString("ddd")
+    } catch { return "" }
 }
 
 function Fmt-Count($n) {
@@ -455,7 +488,9 @@ $renderPanel = {
     $db = New-Object System.Drawing.SolidBrush $accent
     $g.FillEllipse($db, [float]$L, [float]($oy + 89), 7, 7); $db.Dispose()
     # Wraps rather than running off the edge - the panel is narrower than the sentence can be.
-    $words = (PaceWords $script:pace $script:projected $script:hitMins) -split ' '
+    $verdict = StateWords
+    if (-not $verdict) { $verdict = PaceWords $script:pace $script:projected $script:hitMins }
+    $words = $verdict -split ' '
     $line = ""; $ly = 87; $wrapW = $COL - 13
     foreach ($w in $words) {
         $try = if ($line) { "$line $w" } else { $w }
@@ -476,6 +511,14 @@ $renderPanel = {
         $wIn = ResetIn $script:weeklyResets
         $wtxt = if ($wIn) { "$($script:weeklyPct)%   -   $wIn" } else { "$($script:weeklyPct)%" }
         TxtR $wtxt $fBody ([System.Drawing.Color]::FromArgb(188,188,196)) $R 122
+        # Where the week lands at the rate so far. Averaged over days, which is the one case where a
+        # plain average is a fair projection - nothing dominates a week the way one burst dominates
+        # a five-hour window. Silent for the window's first few hours, when it would be noise.
+        if ($script:weeklyHit -gt 0) {
+            TxtL ("out " + (Day-Of $script:weeklyHit)) $fMicro ([System.Drawing.Color]::FromArgb(240,150,90)) ($L + 50) 123
+        } elseif ($script:weeklyProj -ge 0) {
+            TxtL "-> $($script:weeklyProj)%" $fMicro $DIMMER ($L + 50) 123
+        }
         $wt = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(215,38,38,42))
         $wbar = RoundedPath $L ($oy + 136) $COL 5 2
         $g.FillPath($wt, $wbar); $wt.Dispose()
@@ -692,6 +735,11 @@ $timer.Add_Tick({
             try { if ($null -ne $j.hit_mins)  { $hm = [int]$j.hit_mins } }    catch { $hm = -1 }
             try { if ($null -ne $j.burn)      { $bn = [double]$j.burn } }     catch { $bn = -1.0 }
             try { $inf = [bool]$j.inferred } catch { $inf = $false }
+            try { $script:err = [string]$j.err } catch { $script:err = "" }
+            try { $script:nextTry = [int64]$j.next_try } catch { $script:nextTry = 0 }
+            try { $script:readingTs = [int64]$j.ts } catch { $script:readingTs = 0 }
+            try { $script:weeklyProj = if ($null -ne $j.weekly_projected) { [int]$j.weekly_projected } else { -1 } } catch { $script:weeklyProj = -1 }
+            try { $script:weeklyHit = if ($null -ne $j.weekly_hit) { [int64]$j.weekly_hit } else { 0 } } catch { $script:weeklyHit = 0 }
             # The readings behind the burn rate, for the sparkline. Guard the null explicitly:
             # @($null).Count is 1 in PowerShell 5.1, so the usual @(...) idiom would report one
             # phantom sample and the draw would then die indexing into it.
@@ -726,7 +774,10 @@ $timer.Add_Tick({
         $lu = -1.0
         if ($null -ne $tot -and $j) {
             try {
-                $per = 320000.0                      # hal_usage.PER_PT_DEFAULT, until it has fitted one
+                # Both of these come from hal_usage rather than being copied here. A constant kept
+                # in two languages is a constant that will disagree with itself eventually.
+                $per = 0.0
+                try { if ($null -ne $j.per_pt_default) { $per = [double]$j.per_pt_default } } catch {}
                 try { if ($null -ne $j.per_pt -and [double]$j.per_pt -gt 0) { $per = [double]$j.per_pt } } catch {}
                 $au = [double]$j.anchor_util; $at = [double]$j.anchor_tok
                 if ($per -gt 0) {

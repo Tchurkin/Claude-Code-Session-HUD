@@ -39,11 +39,9 @@ $script:hot = $false
 $script:flip = 0.0          # 0 = pointing right (push it away), 1 = pointing left (pull it back)
 $script:lastDrawn = -99.0
 $script:lastHot = $false
-$script:lastFrame = 0
 $script:lastBeat = 0
 $script:lastPresence = 0
 $script:curInterval = 200
-$script:lbWas = $false
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -119,7 +117,6 @@ $form.Add_MouseDown({
     param($sender, $e)
     # Either button, same as the readout: nothing else claims a right-click out here.
     if (-not (InStrip)) { return }
-    $script:lbWas = $true
     Set-DockStowed (-not (Dock-Stowed))
 })
 

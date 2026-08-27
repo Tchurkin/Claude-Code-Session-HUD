@@ -91,8 +91,6 @@ public class PerPixelLayered {
     // Hit-testing then falls to the layered surface's alpha, so only the pixels actually drawn take
     // a click and the transparent canvas around them still passes clicks straight through.
     public static void InitClickable(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|WS_EX_LAYERED|0x08000000|0x80); MakeTopmost(h); }
-    // Add click-through WITHOUT forcing WS_EX_LAYERED (for Form.Opacity overlays that manage layering themselves).
-    public static void AddClickThrough(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x20|0x08000000|0x80); MakeTopmost(h); }
     // Don't steal foreground when shown/clicked (WS_EX_NOACTIVATE) - so notification popups
     // don't yank focus off the chat window (which would drop the window-tint bar).
     public static void NoActivate(IntPtr h){ SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h,GWL_EXSTYLE)|0x08000000); MakeTopmost(h); }
@@ -565,16 +563,6 @@ function Hud-Enabled {
     $c = $script:cfgCache
     if ($c -and ($c.PSObject.Properties.Name -contains 'enabled')) { return [bool]$c.enabled }
     return $true
-}
-function Set-HudEnabled($val) {
-    try {
-        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:HalCfgPath))
-        $c = Read-JsonFile $script:HalCfgPath
-        if (-not $c) { $c = [pscustomobject]@{} }
-        if ($c.PSObject.Properties.Name -contains 'enabled') { $c.enabled = [bool]$val }
-        else { $c | Add-Member -NotePropertyName enabled -NotePropertyValue ([bool]$val) }
-        Write-JsonFile $script:HalCfgPath $c
-    } catch {}
 }
 
 # Bottom-anchored variant: newest sits AT the bottom anchor, older stack upward above it.

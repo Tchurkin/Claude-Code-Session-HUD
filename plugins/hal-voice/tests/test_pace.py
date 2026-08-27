@@ -7,7 +7,8 @@ looked right when it was written is exactly the kind of thing a later tidy-up qu
 
 Nothing here touches the real usage cache or the network - `fetch` is replaced throughout.
 """
-import os, re, shutil, subprocess, sys, tempfile
+import os, re, shutil, subprocess, sys, tempfile, time
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import check                # noqa: E402  (also puts scripts/ on the path)
@@ -679,6 +680,79 @@ check(len(big["long"]) == hu.LONG_MAX, "and it is capped (got %d)" % len(big["lo
 check(hu.LONG_MAX * hu.LONG_EVERY_MS >= 5 * 60 * 60 * 1000,
       "with room for a whole five-hour window (%d samples of %ds)" % (hu.LONG_MAX, hu.LONG_EVERY_MS / 1000))
 print("long history: one a minute, %d samples, cleared with the window" % hu.LONG_MAX)
+
+# -- 14. the weekly window, and saying why the reading is not current -------------------------------
+WEEK = hu.WEEK_MINS
+
+
+def _wk(pct, mins_left):
+    return {"weekly_pct": pct,
+            "weekly_resets": (datetime.now(timezone.utc) + timedelta(minutes=mins_left)).isoformat()}
+
+
+check(hu.weekly_project(_wk(20, WEEK - 60))[0] is None,
+      "an hour into the week says nothing - one busy morning would project a catastrophe")
+check(hu.weekly_project(_wk(0, WEEK // 2))[0] is None, "and neither does an unused week")
+check(hu.weekly_project({"weekly_pct": 20})[0] is None, "nor one with no reset time")
+
+# Half the week gone, a fifth spent: on pace for two fifths.
+proj, hit = hu.weekly_project(_wk(20, WEEK // 2))
+check(abs(proj - 40.0) < 0.5, "half a week at 20%% projects 40%% (got %r)" % proj)
+check(hit is None, "and does not run out")
+
+# Half the week gone, three fifths spent: over, and it says when.
+proj, hit = hu.weekly_project(_wk(60, WEEK // 2))
+check(abs(proj - 120.0) < 0.5, "three fifths by halfway projects 120%% (got %r)" % proj)
+check(hit is not None, "and that one does run out")
+hit_in = (hit - time.time() * 1000) / 60000.0
+# It reaches 100 at 5/6 of the way through, so 1/3 of a week from now.
+check(abs(hit_in - WEEK / 3.0) < 60, "a third of a week away (got %.0f min, want %.0f)"
+                                     % (hit_in, WEEK / 3.0))
+# A week nearly over projects essentially what it has already spent - there is no time left for the
+# rate to change anything, which is the projection being right rather than being switched off.
+near = hu.weekly_project(_wk(99, 10))[0]
+check(abs(near - 99.0) < 0.5, "a week with ten minutes left projects itself (got %r)" % near)
+check(hu.weekly_project(_wk(50, 0))[0] is None, "and one that has already reset is not projected")
+print("weekly: projected from the rate so far, silent for the first %dh" % (hu.WEEK_MIN_SEEN / 60))
+
+# The drawing history has to be cleared by the same rule the fit history uses. It was not: it
+# required BOTH the old and new reset times to be present, and _infer_rollover clears the old one
+# precisely BECAUSE the window rolled - so the next real fetch concluded nothing had changed. The
+# chart then spanned two windows, drawing the rollover as a cliff down the middle of the session.
+tmp14 = tempfile.mkdtemp(prefix="hud-roll14-")
+_s14 = (hu.CACHE, hu.fetch)
+hu.CACHE = os.path.join(tmp14, "u.json")
+then = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+hu._publish({"ts": int(time.time() * 1000) - 30 * 60000, "session_resets": None,   # inferred rollover
+             "session_pct": 0, "session_util": 0.0,
+             "long": [[1, 40.0], [2, 41.0], [3, 42.0]]})                            # the OLD window's
+hu.fetch = lambda timeout=10: {"ts": int(time.time() * 1000), "session_pct": 3, "session_util": 3.0,
+                               "session_resets": then, "weekly_pct": 16,
+                               "weekly_resets": then, "severity": "normal"}
+hu.refresh(force=True)
+lg = hu.read().get("long") or []
+check(len(lg) == 1 and abs(lg[0][1] - 3.0) < 1e-9,
+      "a fetch after an inferred rollover starts the chart over (got %r)" % lg)
+hu.CACHE, hu.fetch = _s14
+shutil.rmtree(tmp14, ignore_errors=True)
+print("rollover: the chart never spans two windows")
+
+# The meter no longer keeps its own copy of the tokens-per-point default - a constant living in two
+# languages is a constant that disagrees with itself eventually, which is how the daemon came to
+# beat slower than its own staleness threshold.
+meter = src   # already read at the top of this file
+check("per_pt_default" in meter, "the meter reads the default from hal_usage")
+check(str(int(hu.PER_PT_DEFAULT)) not in meter,
+      "and does not carry a copy of %d" % hu.PER_PT_DEFAULT)
+check('"per_pt_default"' in open(hu.__file__, encoding="utf-8").read(),
+      "which means hal_usage has to publish it")
+
+# Every state the meter can be in has words for it, and each is distinguishable from the data.
+for want in ("auth", "rate", "net"):
+    check('"%s"' % want in meter, "the meter names the %r failure" % want)
+check("StateWords" in meter and "PaceWords" in meter,
+      "and the state line takes precedence over the pace verdict")
+print("state: auth / rate / net / stale / new-window all have words")
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - pace maths, backoff and the shipped colour ramp all hold")

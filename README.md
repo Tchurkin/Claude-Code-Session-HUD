@@ -201,6 +201,21 @@ offset is remembered, only new bytes are parsed, a record still being written is
 and a file that has shrunk is treated as a new file rather than a rewind. Steady-state cost is about
 35ms every five seconds, in the daemon, off your editor's thread.
 
+### When it can't say
+
+The panel says *why* rather than just going grey: **signed out** (the token renews the next time you
+use Claude), **rate limited**, **can't reach the endpoint** — each with the retry countdown — or
+**last known reading, 22m old**. All four were already distinguishable in the data; the meter simply
+never showed them, so the only way to find out was to read a cache file.
+
+### The weekly window
+
+Projected from the plain average rate over however much of the week has elapsed — no fitted slope
+needed. A seven-day window averaged over days is exactly the case where "at the rate so far" is fair:
+nothing dominates a week the way one burst dominates a five-hour window. It stays silent for the
+window's first six hours, when a busy morning would project a catastrophe, and names the day if the
+rate would run it out early.
+
 ### The reading between readings
 
 The endpoint answers in whole percentage points, every 45 seconds at best — so between answers the

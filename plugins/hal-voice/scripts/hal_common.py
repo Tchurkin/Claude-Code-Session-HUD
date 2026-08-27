@@ -92,17 +92,6 @@ def slot_color(slot):
             return rgb
         sat -= 0.02
 
-
-def session_color(session_id):
-    """Stable fallback accent (hash the id onto the same wheel) for callers that don't have a
-    slot. The live badge path assigns real, collision-free slots instead - see
-    ``hal_badge._assign_slot`` - so this is only a last resort."""
-    if not session_id:
-        return slot_color(0)
-    h = int(hashlib.md5(str(session_id).encode("utf-8")).hexdigest(), 16)
-    return slot_color(h % 64)
-
-
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
     return DATA_DIR
@@ -120,14 +109,4 @@ def load_config():
     except Exception:
         pass
     return cfg
-
-
-def save_config(cfg):
-    ensure_data_dir()
-    merged = dict(_DEFAULTS)
-    merged.update(cfg)
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
-    os.replace(tmp, CONFIG_PATH)
     return merged

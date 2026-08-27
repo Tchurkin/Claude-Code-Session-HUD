@@ -37,7 +37,7 @@ function NowMsLocal { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 
 $st = Read-State
 $script:R = 0; $script:G = 215; $script:B = 80; $script:Label = ""; $script:Hwnd = [int64]0
-$script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""; $script:Proj = ""
+$script:State = "done"; $script:phase = 0; $script:Branch = ""; $script:Reason = ""
 $script:Showing = $true       # is our chat the tab its window is currently on? (assume yes if unknown)
 $script:baseBmp = $null       # cached chip surface (everything but the state dot)
 $script:Title = ""            # the chat's own title
@@ -50,7 +50,6 @@ if ($st) {
     if ($st.state)  { $script:State  = [string]$st.state }
     if ($st.branch) { $script:Branch = [string]$st.branch }
     if ($st.reason) { $script:Reason = [string]$st.reason }
-    if ($st.proj)   { $script:Proj   = [string]$st.proj }
     if ($st.title)  { $script:Title  = [string]$st.title }
     if ($st.tab)    { $script:Tab    = [string]$st.tab }
     if ($null -ne $st.branch_show) { $script:BranchShow = [bool]$st.branch_show }
@@ -116,7 +115,6 @@ $script:tick = 0
 $script:closeReq = $false
 $script:hover = $false
 $script:active = $false       # our chat's window is focused -> keep the tab lit (the tab you're on)
-$script:presentTs = 0         # last time the user was actively present in this chat (from state)
 $script:missCount = 0         # consecutive missing state reads (hysteresis, so a blip doesn't flicker)
 $script:maybeDrag = $false    # left button is down; still deciding click-vs-drag
 $script:dragging  = $false    # actively dragging this tab to reorder it
@@ -404,11 +402,9 @@ $timer.Add_Tick({
                 Recalc; $changed = $true    # any of these can change the chip's displayed text/width
             }
             if ($st.hwnd) { $script:Hwnd = [int64]$st.hwnd }   # may be rebound as the user revisits the chat
-            if ($st.proj) { $script:Proj = [string]$st.proj }
             $script:Showing = ($null -eq $st.showing) -or [bool]$st.showing
             if ($st.title) { $script:Title = [string]$st.title }
             if ($st.tab)   { $script:Tab   = [string]$st.tab }
-            if ($st.present_ts) { $script:presentTs = [int64]$st.present_ts }
             # A dead window handle is NOT a dead chat - VS Code hands out a new handle on reload, and
             # a chat can outlive the window we happened to bind it to. Closing on that is what used to
             # make tabs vanish from under open chats. Whether this chat still exists is decided in one

@@ -75,6 +75,9 @@ CAL_PAIRS      = 8           # how many recent pairs the fit averages over
 # Measured on this machine at 276k-420k across two independent methods.
 PER_PT_DEFAULT = 320000.0
 
+WEEK_MINS      = 7 * 24 * 60
+WEEK_MIN_SEEN  = 6 * 60      # don't project a week from its first few hours
+
 # Telling you once, at the moment it becomes true, that this window is going to run out early.
 # Two thresholds rather than one: against a single 0.5 boundary a pace sitting at 0.499/0.501 crosses
 # up on alternate polls and chatters at you all afternoon. It has to fall back to PACE_CLEAR - a
@@ -384,6 +387,31 @@ def _keep_long(cur, ts, util, rolled):
     return lg[-LONG_MAX:]
 
 
+def weekly_project(cur):
+    """Where the weekly window lands, and when it would run out. Returns (percent, hit_ms).
+
+    From the plain average rate over however much of the week has already elapsed - no calibration,
+    no fitted slope. A seven-day window averaged over days is precisely the case where "at the rate
+    so far" is a fair projection; the five-hour one needs a fitted burn because a single burst
+    dominates it, but nothing dominates a week. Says nothing at all for the first few hours, when
+    one busy morning would project a catastrophe."""
+    util = cur.get("weekly_pct")
+    left = mins_until(cur.get("weekly_resets"))
+    if util is None or left is None or left <= 0:
+        return None, None
+    elapsed = WEEK_MINS - left
+    if elapsed < WEEK_MIN_SEEN or util <= 0:
+        return None, None
+    projected = min(999.0, float(util) * WEEK_MINS / elapsed)
+    hit = None
+    if projected > 100.0:
+        start = epoch_ms(cur.get("weekly_resets"))
+        if start is not None:
+            start -= WEEK_MINS * 60000.0                  # when this window opened
+            hit = int(start + (elapsed * 100.0 / float(util)) * 60000.0)
+    return projected, hit
+
+
 def project(cur):
     """Work out burn / projected / pace / hit_mins for a reading, in place. Returns it."""
     util = cur.get("session_util")
@@ -393,6 +421,13 @@ def project(cur):
     rate = burn_rate(cur.get("history") or [])
     cur["burn"] = None if rate is None else round(rate, 4)
     cur["pace"] = cur["projected"] = cur["hit_mins"] = None
+    # Where the week lands, and the tokens-per-point default. Both published rather than duplicated
+    # in PowerShell: a constant kept in two languages is one that will disagree with itself, which is
+    # exactly how the daemon came to beat slower than its own staleness threshold and look dead.
+    wp, wh = weekly_project(cur)
+    cur["weekly_projected"] = int(round(wp)) if wp is not None else None
+    cur["weekly_hit"] = wh
+    cur["per_pt_default"] = PER_PT_DEFAULT
     if util is None:
         return cur
     p = pace(util, rate, left)
@@ -475,8 +510,12 @@ def refresh(force=False, active=None, tok_total=None):
     got["history"] = (_keep(prior, [got["ts"], util], got.get("session_resets"),
                             cur.get("session_resets"))
                       if util is not None else prior)
-    rolled_w = bool(got.get("session_resets") and cur.get("session_resets")
-                    and not same_window(got["session_resets"], cur["session_resets"]))
+    # Same test _keep uses, and for the same reason: when we do not know which window the previous
+    # reading belonged to, assume it was a different one. Requiring BOTH sides to be present missed
+    # the case that matters - _infer_rollover clears session_resets precisely BECAUSE the window
+    # rolled, so the next real fetch saw a missing previous window and decided nothing had changed.
+    # The chart then spanned two windows and drew the rollover as a cliff in the middle of it.
+    rolled_w = not same_window(got.get("session_resets"), cur.get("session_resets"))
     for k in ("cal", "cal_from_util", "cal_from_tok", "per_pt", "anchor_util", "anchor_tok"):
         if k in cur:
             got[k] = cur[k]                            # fetch() builds a fresh dict; carry these over
