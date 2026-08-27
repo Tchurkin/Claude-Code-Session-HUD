@@ -661,6 +661,26 @@ check(hu.live_util({"per_pt": 0, "anchor_util": 1, "anchor_tok": 0}, 5.0) is not
 # report the anchor as though it were current - refusing is the honest answer.
 check(hu.live_util({"per_pt": -5.0, "anchor_util": 20.0, "anchor_tok": 0.0}, 1000.0) is None,
       "as is a negative one")
+# The low side is the dangerous one, and it is not hypothetical. Utilization is the whole plan, so
+# the desktop app or the web app move it while spending no tokens any transcript here records. That
+# reads as "the window moved a long way on very few tokens", drags the fitted rate down, and then
+# makes the live reading run ahead of the truth. Observed for real: a 14-point pair carrying only
+# 2.9M local tokens pulled the rate from 587k to 366k, and the old guard let it through.
+poison = {"cal": [[5.0, 3_000_000.0]], "cal_from_util": 10.0, "cal_from_tok": 0.0}
+hu._calibrate(poison, 24.0, 2_900_000.0, False)      # 14 points, mostly spent somewhere else
+check(len(poison["cal"]) == 1,
+      "a pair the local tokens cannot account for is refused (got %r)" % poison["cal"])
+check(abs(poison["per_pt"] - 600000) < 1 if poison.get("per_pt") else True,
+      "so the rate keeps what the clean pairs said")
+
+# The first pair sets the reference for every later one and had nothing checking it at all.
+first = {"cal_from_util": 0.0, "cal_from_tok": 0.0}
+hu._calibrate(first, 20.0, 400_000.0, False)         # 20 points on 400k tokens: not plausible
+check(not first.get("cal"), "and the very first pair is checked against the default too")
+first2 = {"cal_from_util": 0.0, "cal_from_tok": 0.0}
+hu._calibrate(first2, 20.0, 20.0 * hu.PER_PT_DEFAULT, False)
+check(first2.get("per_pt"), "while a plausible first pair is accepted")
+
 print("live reading: fitted at %s tokens/point, carried forward, snapped back by every fetch"
       % "{:,.0f}".format(cal["per_pt"]))
 
@@ -719,6 +739,27 @@ check(abs(hit_in - WEEK / 3.0) < 60, "a third of a week away (got %.0f min, want
 near = hu.weekly_project(_wk(99, 10))[0]
 check(abs(near - 99.0) < 0.5, "a week with ten minutes left projects itself (got %r)" % near)
 check(hu.weekly_project(_wk(50, 0))[0] is None, "and one that has already reset is not projected")
+# Burn we measured against burn we can explain. The remainder is real spend from somewhere with no
+# transcript on this machine, and without it the panel shows a red-hot bar over a list of chats that
+# plainly are not doing it - which looks like a broken panel rather than usage happening elsewhere.
+def _els(rate, tpm, per=400000.0):
+    c = {"session_util": 20.0, "session_resets": (datetime.now(timezone.utc)
+                                                  + timedelta(hours=3)).isoformat(),
+         "history": [[i * MIN, 20.0 + rate * i] for i in range(21)],
+         "per_pt": per, "tpm_seen": tpm}
+    return hu.project(c)["elsewhere"]
+
+
+check(_els(1.4, 20000) is not None, "a window burning far faster than the tokens explain is flagged")
+got = _els(1.4, 20000)
+check(abs(got - (1.4 * 400000 - 20000)) < 2000, "and sized in the same units as the chat rows (got %r)" % got)
+check(_els(0.05, 20000) is None, "tokens that account for the burn leave nothing over")
+check(_els(1.4, 1.4 * 400000) is None, "nor does an exact account")
+check(hu.project({"session_util": 20.0, "history": [], "per_pt": 400000.0})["elsewhere"] is None,
+      "and with no fitted burn there is no claim to make")
+check(_els(0.06, 20000) is None, "a small difference is fitting noise, not a second machine")
+print("elsewhere: burn the transcripts cannot account for, sized like the rows beside it")
+
 print("weekly: projected from the rate so far, silent for the first %dh" % (hu.WEEK_MIN_SEEN / 60))
 
 # The drawing history has to be cleared by the same rule the fit history uses. It was not: it

@@ -77,6 +77,7 @@ $script:nextTry = 0        # when it will try again
 $script:readingTs = 0      # when the reading we are showing was actually taken
 $script:weeklyProj = -1    # where the week lands at the rate so far
 $script:weeklyHit = 0      # ... and when it would run out, if it would
+$script:elsewhere = 0      # burn we measured but cannot account for locally
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -400,6 +401,13 @@ function Chat-Meta($sid) {
         $script:chatMeta[$sid] = $m
         return $m
     }
+    # Not a chat at all: spend the plan charged for that nothing on this machine wrote down.
+    if ($sid -eq "elsewhere") {
+        $m.label = "Elsewhere"
+        $m.color = [System.Drawing.Color]::FromArgb(150,140,120)
+        $script:chatMeta[$sid] = $m
+        return $m
+    }
     try {
         $st = Read-JsonFile (Join-Path $badgesDir "$sid.json")
         if ($st) {
@@ -556,7 +564,14 @@ $renderPanel = {
 
     # Which chats are actually spending it. The HUD has always known both halves of this - what each
     # tab is, and what the window costs - and never put them next to each other.
+    # Anything the plan charged for that no transcript here explains - the desktop app, the web app,
+    # another machine. Without it the panel shows a red-hot bar over a list of chats that plainly are
+    # not doing it, which looks like the panel is broken rather than like usage happening elsewhere.
     $rows2 = @($script:byChat)
+    if ($script:elsewhere -gt 0) {
+        $rows2 = @($rows2) + @(, @("elsewhere", $script:elsewhere))
+        $rows2 = @($rows2 | Sort-Object -Property @{ Expression = { [double]$_[1] } } -Descending)
+    }
     if ($rows2.Count -gt 0) {
         TxtL "SPENDING IT" $fEye $DIM $L 240
         $topRate = [double]$rows2[0][1]
@@ -749,6 +764,7 @@ $timer.Add_Tick({
             try { $script:readingTs = [int64]$j.ts } catch { $script:readingTs = 0 }
             try { $script:weeklyProj = if ($null -ne $j.weekly_projected) { [int]$j.weekly_projected } else { -1 } } catch { $script:weeklyProj = -1 }
             try { $script:weeklyHit = if ($null -ne $j.weekly_hit) { [int64]$j.weekly_hit } else { 0 } } catch { $script:weeklyHit = 0 }
+            try { $script:elsewhere = if ($null -ne $j.elsewhere) { [int]$j.elsewhere } else { 0 } } catch { $script:elsewhere = 0 }
             # The readings behind the burn rate, for the sparkline. Guard the null explicitly:
             # @($null).Count is 1 in PowerShell 5.1, so the usual @(...) idiom would report one
             # phantom sample and the draw would then die indexing into it.

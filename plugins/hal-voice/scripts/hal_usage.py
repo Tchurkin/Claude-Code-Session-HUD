@@ -336,12 +336,21 @@ def _calibrate(cur, util, total, rolled):
     # Reject a pair that disagrees wildly with what we already believe. One bad reading - a daemon
     # restart that re-tails a transcript, a machine that slept through half a window - would
     # otherwise drag the fit somewhere it takes hours to climb back from.
+    ref = PER_PT_DEFAULT
     if pairs:
-        known = sum(x[1] for x in pairs) / max(1e-9, sum(x[0] for x in pairs))
-        this = dt / du
-        if known > 0 and (this > known * 4 or this < known / 4):
-            cur["cal_from_util"], cur["cal_from_tok"] = util, total
-            return
+        ref = sum(x[1] for x in pairs) / max(1e-9, sum(x[0] for x in pairs))
+    this = dt / du
+    # The low side is the dangerous one, and it is not hypothetical: utilization is the whole plan,
+    # so Claude Desktop or the web app move it while spending no tokens we can see here. That reads
+    # as "the window moved a long way on very few tokens" and drags the fitted rate down, which then
+    # makes the live reading run ahead of the truth. A pair only counts when what we measured
+    # locally plausibly accounts for the movement.
+    #
+    # Guarded against PER_PT_DEFAULT when there are no pairs yet, because the very first pair sets
+    # the reference for every later one and had nothing checking it at all.
+    if ref > 0 and (this > ref * 3 or this < ref / 2):
+        cur["cal_from_util"], cur["cal_from_tok"] = util, total
+        return
     pairs.append([round(du, 3), round(dt, 1)])
     cur["cal"] = pairs[-CAL_PAIRS:]
     cur["cal_from_util"], cur["cal_from_tok"] = util, total
@@ -424,6 +433,19 @@ def project(cur):
     # Where the week lands, and the tokens-per-point default. Both published rather than duplicated
     # in PowerShell: a constant kept in two languages is one that will disagree with itself, which is
     # exactly how the daemon came to beat slower than its own staleness threshold and look dead.
+    # Burn we measured against burn we can explain. Utilization is the whole plan, not just Claude
+    # Code on this machine, so the difference is real spend from somewhere with no transcript here -
+    # the desktop app, the web app, another machine. Expressed in the same weighted-tokens-a-minute
+    # the per-chat rows use, so it can sit among them and be compared at a glance.
+    per = cur.get("per_pt") or PER_PT_DEFAULT
+    seen = cur.get("tpm_seen")
+    cur["elsewhere"] = None
+    if rate is not None and seen is not None and per > 0:
+        gap = rate * per - float(seen)
+        # A fitted rate against a windowed average will not agree exactly; only claim a gap that is
+        # both large in absolute terms and a real share of the total, never a rounding difference.
+        if gap > 20000 and gap > 0.25 * rate * per:
+            cur["elsewhere"] = int(round(gap))
     wp, wh = weekly_project(cur)
     cur["weekly_projected"] = int(round(wp)) if wp is not None else None
     cur["weekly_hit"] = wh
@@ -469,7 +491,7 @@ def _num(d, key):
         return 0.0
 
 
-def refresh(force=False, active=None, tok_total=None):
+def refresh(force=False, active=None, tok_total=None, tpm=None):
     """Fetch no more often than the cadence deserves, and publish for the overlays to draw.
 
     `active` says whether a chat is mid-turn; see poll_interval. `tok_total` is the running count of
@@ -519,6 +541,7 @@ def refresh(force=False, active=None, tok_total=None):
     for k in ("cal", "cal_from_util", "cal_from_tok", "per_pt", "anchor_util", "anchor_tok"):
         if k in cur:
             got[k] = cur[k]                            # fetch() builds a fresh dict; carry these over
+    got["tpm_seen"] = tpm
     _calibrate(got, util, tok_total, rolled_w)
     got["anchor_util"], got["anchor_tok"] = util, tok_total
     got["long"] = _keep_long(cur, got["ts"], util, rolled_w)

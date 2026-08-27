@@ -246,6 +246,12 @@ it wrote, a scratch run in a temp folder — is summed into a single **Other** r
 listed as rows of hex nobody can act on. It competes for position on size like any other row:
 if the thing eating your window is something you aren't looking at, that's worth reading first.
 
+And an **Elsewhere** row for burn no transcript here explains at all — the desktop app, the web app,
+another machine. Utilization is the whole plan, not just Claude Code on this laptop, so the window
+can run hot while every chat you can see is idle. The figure is what the plan's own movement implies
+minus what the transcripts account for, in the same units as the rows beside it. It is only claimed
+when the difference is both large and a real share of the total, never a rounding gap in the fit.
+
 ### When it can't reach the endpoint
 
 The token Claude Code stores expires, and it's renewed by *using* Claude — so a machine left overnight
