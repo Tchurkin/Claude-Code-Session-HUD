@@ -190,7 +190,53 @@ check(abs(rows[1][1] - 300 / mins) < 1,
 check(len(ht.by_chat(samples, now6, top=1)) == 1, "the list is capped for the panel")
 check(ht.by_chat([[now6, 0.4, 0, 0, "x"]], now6) == [],
       "and a chat spending essentially nothing is not listed")
-print("attribution: sub-agents bill to their parent chat, biggest first")
+
+# Spend from anything without a tab is one OTHER row, not a row of hex nobody can act on: a session
+# run straight from a terminal, a chat closed since it wrote, a scratch run in a temp folder.
+mixed = [[now6 - 60000, 100.0, 10, 50, "aaaa1111"],
+         [now6 - 50000, 500.0, 30, 90, "bbbb2222"],
+         [now6 - 40000, 60.0, 5, 20, "zzzz9999"],      # no tab
+         [now6 - 30000, 30.0, 5, 20, "yyyy8888"]]      # no tab either
+rows = ht.by_chat(mixed, now6, known={"aaaa1111", "bbbb2222"})
+by = dict((r[0], r[1]) for r in rows)
+check(ht.OTHER in by, "the untracked chats are grouped (got %r)" % rows)
+check("zzzz9999" not in by and "yyyy8888" not in by, "and not listed individually")
+check(abs(by[ht.OTHER] - 90 / mins) < 1, "summed together (got %r)" % by[ht.OTHER])
+check(by["bbbb2222"] > by["aaaa1111"] > by[ht.OTHER], "and ranked on size like any other row")
+
+# It competes for position rather than being pinned last: if the thing eating your window is
+# something you are not looking at, that is worth reading first, not last.
+heavy = [[now6 - 60000, 50.0, 5, 20, "aaaa1111"], [now6 - 50000, 900.0, 5, 20, "qqqq7777"]]
+check(ht.by_chat(heavy, now6, known={"aaaa1111"})[0][0] == ht.OTHER,
+      "a big untracked spender leads the list")
+
+# With nothing tracked at all - the HUD off, or the tabs not spawned yet - grouping would sweep
+# every chat into one row and say nothing, so it does not group.
+plain = ht.by_chat(mixed, now6, known=set())
+check(ht.OTHER not in dict((r[0], r[1]) for r in plain),
+      "no tabs means no grouping, or the whole list becomes one row (got %r)" % plain)
+check(len(plain) == 4, "and every chat is listed on its own (got %d)" % len(plain))
+# End to end, because everything above tests by_chat directly and would not notice if refresh
+# stopped telling it which chats are open.
+tmp6 = tempfile.mkdtemp(prefix="hud-tok6-")
+_sv6 = (ht.PROJECTS_DIR, ht.CACHE, ht.BADGE_DIR)
+ht.PROJECTS_DIR = os.path.join(tmp6, "projects")
+ht.CACHE = os.path.join(tmp6, "tokens.json")
+ht.BADGE_DIR = os.path.join(tmp6, "badges")
+os.makedirs(os.path.join(ht.PROJECTS_DIR, "proj"))
+os.makedirs(ht.BADGE_DIR)
+open(os.path.join(ht.BADGE_DIR, "11111111.json"), "w").write("{}")        # one chat has a tab
+for sid, out in (("11111111-aaaa", 400), ("99999999-bbbb", 900)):         # the other does not
+    with open(os.path.join(ht.PROJECTS_DIR, "proj", sid + ".jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(_rec("m-" + sid, out, now6 - 30000) + "\n")
+
+got6 = dict((r[0], r[1]) for r in (ht.refresh(force=True).get("by_chat") or []))
+check("11111111" in got6, "the chat with a tab is named (got %r)" % got6)
+check(ht.OTHER in got6, "and the one without is grouped, through refresh (got %r)" % got6)
+check("99999999" not in got6, "not listed by its id")
+ht.PROJECTS_DIR, ht.CACHE, ht.BADGE_DIR = _sv6
+shutil.rmtree(tmp6, ignore_errors=True)
+print("attribution: sub-agents bill to their parent chat, untracked spend is one Other row")
 
 
 # -- 7. the running total is spend, not history ------------------------------------------------------

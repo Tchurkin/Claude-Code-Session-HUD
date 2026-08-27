@@ -241,6 +241,11 @@ separate file tree and on a busy chat it's the larger half, so leaving it out wo
 chats doing the most. It's the one thing the HUD always knew separately about tabs and about usage
 and never put next to each other.
 
+Spend from anything without a tab — a session run straight from a terminal, a chat closed since
+it wrote, a scratch run in a temp folder — is summed into a single **Other** row rather than
+listed as rows of hex nobody can act on. It competes for position on size like any other row:
+if the thing eating your window is something you aren't looking at, that's worth reading first.
+
 ### When it can't reach the endpoint
 
 The token Claude Code stores expires, and it's renewed by *using* Claude — so a machine left overnight

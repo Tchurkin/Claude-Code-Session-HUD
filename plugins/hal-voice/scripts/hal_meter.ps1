@@ -391,6 +391,15 @@ function Chat-Meta($sid) {
     if (($now - $script:chatMetaAt) -gt 4000) { $script:chatMeta = @{}; $script:chatMetaAt = $now }
     if ($script:chatMeta.ContainsKey($sid)) { return $script:chatMeta[$sid] }
     $m = @{ label = $sid; color = [System.Drawing.Color]::FromArgb(150,150,158) }
+    # Everything without a tab, summed: a session run from a terminal, a chat closed since it wrote,
+    # a scratch run in a temp folder. Named rather than shown as hex nobody can act on, and left
+    # deliberately colourless - it is a remainder, not a chat you can click through to.
+    if ($sid -eq "other") {
+        $m.label = "Other"
+        $m.color = [System.Drawing.Color]::FromArgb(128,128,136)
+        $script:chatMeta[$sid] = $m
+        return $m
+    }
     try {
         $st = Read-JsonFile (Join-Path $badgesDir "$sid.json")
         if ($st) {

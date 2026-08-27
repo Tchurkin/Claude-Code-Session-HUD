@@ -27,6 +27,7 @@ import hal_common as hc
 CLAUDE_DIR   = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(hc.HOME, ".claude")
 PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 CACHE        = os.path.join(hc.DATA_DIR, "tokens.json")
+BADGE_DIR    = os.path.join(hc.DATA_DIR, "badges")   # one state file per chat the HUD tracks
 
 REFRESH_MS   = 5000            # the daemon calls this often; the work is gated to here
 RESCAN_MS    = 30000           # how often to re-list the projects tree rather than the hot files
@@ -165,16 +166,40 @@ def _rate(samples, now, window=WINDOW_MS):
     return (w / mins, o / mins, c / mins)
 
 
-def by_chat(samples, now, window=WINDOW_MS, top=TOP_CHATS):
+OTHER = "other"          # everything that is not one of the chats you have open
+
+
+def open_chats():
+    """The chats the HUD is tracking, by their short id - one state file each, so a directory
+    listing answers it without opening anything."""
+    try:
+        return set(f[:-5] for f in os.listdir(BADGE_DIR) if f.endswith(".json"))
+    except Exception:
+        return set()
+
+
+def by_chat(samples, now, window=WINDOW_MS, top=TOP_CHATS, known=None):
     """Weighted tokens a minute, per chat, biggest first.
 
     The one thing the HUD knew separately about tabs and about usage and never joined up: which of
-    the chats you have open is the one eating the window."""
+    the chats you have open is the one eating the window.
+
+    Spend from anything without a tab - a session run straight from a terminal, a chat closed since
+    it wrote, a scratch run in a temp folder - is summed into one OTHER row rather than listed as a
+    row of hex nobody can act on. It competes for position on size like any other row, because if
+    the thing eating your window is something you are not looking at, that is worth knowing early
+    rather than reading last.
+
+    `known` empty means the HUD is not tracking anything (it is off, or the tabs have not spawned
+    yet); grouping then would sweep every chat into OTHER and say nothing, so it is skipped."""
     lo = now - window
     per = {}
     for s in samples:
         if len(s) >= 5 and s[0] >= lo:
-            per[s[4]] = per.get(s[4], 0.0) + float(s[1])
+            sid = s[4]
+            if known and sid not in known:
+                sid = OTHER
+            per[sid] = per.get(sid, 0.0) + float(s[1])
     mins = window / 60000.0
     rows = sorted(((sid, v / mins) for sid, v in per.items()), key=lambda r: -r[1])
     return [[sid, int(round(v))] for sid, v in rows[:top] if v >= 1]
@@ -252,7 +277,7 @@ def refresh(force=False):
     out = {"ts": now, "scan_ts": scanned, "hot": files, "offsets": offsets,
            "samples": samples, "ids": seen, "total": round(total, 1),
            "tpm": int(round(tpm)), "opm": int(round(opm)), "cpm": int(round(cpm)),
-           "n": len(samples), "by_chat": by_chat(samples, now)}
+           "n": len(samples), "by_chat": by_chat(samples, now, known=open_chats())}
     _publish(out)
     return out
 
