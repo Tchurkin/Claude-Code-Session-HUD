@@ -496,7 +496,8 @@ def _seed(resets, weekly_resets=None, **extra):
     d = {"ts": int(time.time() * 1000) - 20 * 60 * 1000, "session_pct": 40, "session_util": 40.0,
          "session_resets": resets, "weekly_pct": 12,
          "weekly_resets": weekly_resets or (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
-         "history": [[1, 40.0], [2, 40.0]], "burn": 0.17, "pace": 0.4, "projected": 44}
+         "history": [[1, 40.0], [2, 40.0]], "long": [[1, 38.0], [2, 40.0]],
+         "burn": 0.17, "pace": 0.4, "projected": 44}
     d.update(extra)
     hu._publish(d)
 
@@ -517,6 +518,11 @@ check(c.get("inferred") is True, "marked as worked out rather than measured")
 check(c.get("session_resets") is None,
       "with no reset time invented - a fresh window has no anchor until you send something")
 check(c.get("history") == [], "the old window's samples go with it")
+# And so does the chart's own, coarser history. Keeping it left the sparkline spanning two windows,
+# joining the last reading before you stopped to the first zero of the next one - and because the
+# chart draws straight lines between samples, ten idle hours across a rollover came out as one long
+# diagonal that reads as a slow decline. Utilization does not decay while you are idle.
+check(c.get("long") == [], "and so do the chart's, or it draws across the rollover")
 check(c.get("burn") is None and c.get("pace") == 0.0, "and it is not burning anything")
 check(abs(c["ts"] - time.time() * 1000) < 5000,
       "the timestamp moves, because this is current knowledge and should not read as stale")

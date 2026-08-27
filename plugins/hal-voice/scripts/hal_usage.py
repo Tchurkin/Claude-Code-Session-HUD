@@ -552,8 +552,13 @@ def _infer_rollover(cur, now, active):
     left = mins_until(cur.get("session_resets"))
     if left is None or left > 0:
         return False
+    # `long` goes with `history`. It is the window's readings, and this window is over - keeping them
+    # left the chart spanning two windows and, worse, joining the last reading before you stopped to
+    # the first zero of the next one. The sparkline draws straight lines between samples, so ten idle
+    # hours across a rollover came out as one long diagonal that reads as a slow decline. Utilization
+    # does not decay while you are idle; it holds flat and then falls off a cliff at the reset.
     cur.update({"session_pct": 0, "session_util": 0.0, "session_resets": None,
-                "history": [], "burn": None, "pace": 0.0, "projected": 0,
+                "history": [], "long": [], "burn": None, "pace": 0.0, "projected": 0,
                 "hit_mins": None, "pace_hot": False})
     wl = mins_until(cur.get("weekly_resets"))
     if wl is not None and wl <= 0:
