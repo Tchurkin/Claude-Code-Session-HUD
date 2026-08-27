@@ -801,5 +801,79 @@ check("StateWords" in meter and "PaceWords" in meter,
       "and the state line takes precedence over the pace verdict")
 print("state: auth / rate / net / stale / new-window all have words")
 
+# -- 15. the chart shows the rate, not the total ---------------------------------------------------
+# Reported as "I haven't been using any and the graph is still positive". It was: utilization is
+# cumulative, so an idle hour draws as a flat line high up rather than as nothing happening. The
+# bar's own length already says how full the window is; the chart's job is whether you are burning
+# now, which means it has to be able to read zero.
+base15 = 1_700_000_000_000
+flat = [[base15 + i * MIN, 40.0] for i in range(12)]          # twelve idle minutes
+rs = hu.rate_series(flat)
+check(len(rs) == len(flat), "a rate point per reading (got %d)" % len(rs))
+check(all(v == 0.0 for _, v in rs), "an idle window reads zero throughout (got %r)" % [v for _, v in rs])
+
+climb = [[base15 + i * MIN, 40.0 + 2.0 * i] for i in range(12)]   # 2 points a minute
+rs = hu.rate_series(climb)
+check(abs(rs[-1][1] - 2.0) < 1e-9, "a steady 2 %%/min climb reads 2 (got %r)" % rs[-1][1])
+check(rs[0][1] == 0.0, "and the first reading has no span behind it to measure over")
+
+# The one that matters: burn, then stop. The rate has to come back down, which a cumulative line
+# never does - that is the whole complaint.
+mixed = [[base15 + i * MIN, 10.0 + 3.0 * i] for i in range(6)]
+mixed += [[base15 + (6 + i) * MIN, 25.0] for i in range(8)]
+rs = hu.rate_series(mixed)
+check(max(v for _, v in rs) >= 2.5, "the busy stretch shows up (peak %r)" % max(v for _, v in rs))
+check(rs[-1][1] == 0.0, "and it is back to zero once you stop (got %r)" % rs[-1][1])
+
+# Smoothing, because the reading only moves in whole points: minute to minute it is 0,0,1,0,1,
+# which is a staircase rather than a rate.
+steps = [[base15 + i * MIN, 40.0 + (i // 3)] for i in range(15)]  # a point every three minutes
+rs = [v for _, v in hu.rate_series(steps)][6:]
+check(max(rs) - min(rs) < 0.3, "a staircase smooths to a steady rate (got %r)" % rs)
+check(abs(sum(rs) / len(rs) - 1 / 3.0) < 0.12, "at about the right value (got %.3f)" % (sum(rs) / len(rs)))
+
+check(hu.rate_series([]) == [], "no readings, no chart")
+check(hu.rate_series([[base15, 5.0]]) == [[base15, 0.0]], "one reading claims nothing")
+check(hu.rate_series([[base15, 5.0], [base15, 9.0]])[1][1] == 0.0,
+      "and two at the same instant do not divide by zero")
+
+# Falling utilization is a rollover, never a refund.
+check(all(v >= 0 for _, v in hu.rate_series([[base15, 40.0], [base15 + MIN, 2.0]])),
+      "a rollover cannot draw a negative rate")
+
+meter15 = src
+check("$h = @($script:rates)" in meter15, "the chart draws the rate series, not the cumulative one")
+check("%/min" in meter15, "and is labelled as a rate")
+check(re.search(r"Draw-Spark2 .*\$accent \$true", meter15),
+      "and asks for the zero-floored scale at the call site")
+check(re.search(r"if \(\$fromZero\) \{ SparkNormZero", _ps_function("Draw-Spark2")),
+      "which the drawing has to honour, rather than always taking the general scale")
+
+# Run the two scales rather than checking they exist. This is the difference that matters: a flat
+# idle series must land ON the baseline, and the general-purpose scale - which normalises against
+# the data's own minimum - puts it halfway up the box instead, which reads as "something is
+# happening" during an hour when nothing is.
+probe15 = os.path.join(tmp, "scales.ps1")
+with open(probe15, "w", encoding="utf-8") as f:
+    f.write(_ps_function("SparkNorm") + "\n" + _ps_function("SparkNormZero") + "\n")
+    f.write("$flat = @(0.0, 0.0, 0.0)\n"
+            "Write-Output ('plain|{0}' -f ((SparkNorm $flat 0.4) -join ','))\n"
+            "Write-Output ('zero|{0}'  -f ((SparkNormZero $flat 0.4) -join ','))\n"
+            "$busy = @(0.0, 1.0, 2.0)\n"
+            "Write-Output ('zerobusy|{0}' -f ((SparkNormZero $busy 0.4) -join ','))\n")
+r15 = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-File", probe15],
+                     capture_output=True, text=True)
+check(r15.returncode == 0, "the scales run: %s" % (r15.stderr or "")[:300])
+sc = dict(l.split("|", 1) for l in r15.stdout.strip().splitlines() if "|" in l)
+check(set(float(x) for x in sc["zero"].split(",")) == {0.0},
+      "idle sits on the baseline (got %s)" % sc["zero"])
+check(float(sc["plain"].split(",")[0]) > 0.4,
+      "where the general scale floats it mid-box (got %s) - which is why it is not used here"
+      % sc["plain"])
+busy = [float(x) for x in sc["zerobusy"].split(",")]
+check(busy[0] == 0.0 and busy[-1] == 1.0 and busy[1] == 0.5,
+      "and a real climb still uses the full height (got %r)" % busy)
+print("chart: the rate, zero when idle, smoothed through whole-point steps")
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nOK - pace maths, backoff and the shipped colour ramp all hold")

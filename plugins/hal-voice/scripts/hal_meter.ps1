@@ -78,6 +78,7 @@ $script:readingTs = 0      # when the reading we are showing was actually taken
 $script:weeklyProj = -1    # where the week lands at the rate so far
 $script:weeklyHit = 0      # ... and when it would run out, if it would
 $script:elsewhere = 0      # burn we measured but cannot account for locally
+$script:rates = @()        # how fast the window is going, over time - what the chart draws
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -325,6 +326,7 @@ $render = {
 # let the whole thing come in by nearly a hundred pixels.
 $PANEL_W = 264; $PANEL_H = 400; $PGLOW = 14; $PAD = 14; $COL = 236
 $PSPARK_W = 236; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
+$PSPARK_RATE_TOP = 0.4   # a quiet window still reads as quiet, not as amplified noise
 $fHero  = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
 $fBig   = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
 $fVal   = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
@@ -601,8 +603,10 @@ $renderPanel = {
 
     # The whole window, not the twenty minutes the burn fit happens to need - that span was never a
     # display decision. Falls back to the fit's own samples before the first minute has elapsed.
-    $h = @($script:long)
-    if ($h.Count -lt $SPARK_MIN) { $h = @($script:hist) }
+    # The rate, not the total. How full the window is is what the bar's length says; drawing it
+    # again here answered the wrong question, and read as "still climbing" through an idle hour
+    # because a cumulative line never comes back down.
+    $h = @($script:rates)
     $span = ""
     if ($h.Count -ge 2) {
         try { $span = MinsLong ([int](([double]$h[$h.Count-1][0] - [double]$h[0][0]) / 60000.0)) } catch { }
@@ -613,8 +617,8 @@ $renderPanel = {
     if ($h.Count -ge $SPARK_MIN) {
         $lo = 1000.0; $hi = -1.0
         foreach ($p in $h) { $v = [double]$p[1]; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
-        TxtR ("{0:N0} - {1:N0}%" -f $lo, $hi) $fMicro $DIMMER $R $chartY
-        Draw-Spark2 $g $h $L ($oy + $chartY + 14) $PSPARK_W $PSPARK_H $accent
+        TxtR ("0 - {0:N1} %/min" -f $hi) $fMicro $DIMMER $R $chartY
+        Draw-Spark2 $g $h $L ($oy + $chartY + 14) $PSPARK_W $PSPARK_H $accent $true
     } else {
         TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) $chartY
     }
@@ -659,13 +663,30 @@ function SparkNorm($us, $minSpan) {
     return ,$out
 }
 
-function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col) {
+function SparkNormZero($us, $minTop) {
+    # Floored at zero, because for a rate zero is a real value and the whole point of the chart:
+    # idle has to sit flat on the baseline, not be stretched to fill the box like everything else.
+    $n = @($us).Count
+    if ($n -lt 1) { return ,@() }
+    $hi = [double]$minTop
+    foreach ($u in $us) { $v = [double]$u; if ($v -gt $hi) { $hi = $v } }
+    if ($hi -le 0) { $hi = 1.0 }
+    $out = New-Object 'double[]' $n
+    for ($i = 0; $i -lt $n; $i++) {
+        $f = [double]$us[$i] / $hi
+        if ($f -lt 0) { $f = 0.0 } elseif ($f -gt 1) { $f = 1.0 }
+        $out[$i] = $f
+    }
+    return ,$out
+}
+
+function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col, $fromZero = $false) {
     $n = @($hist).Count
     if ($n -lt 2) { return }
     try {
         $ts = New-Object 'double[]' $n; $us = New-Object 'double[]' $n
         for ($i = 0; $i -lt $n; $i++) { $ts[$i] = [double]$hist[$i][0]; $us[$i] = [double]$hist[$i][1] }
-        $f = SparkNorm $us $PSPARK_MIN_SPAN
+        $f = if ($fromZero) { SparkNormZero $us $PSPARK_RATE_TOP } else { SparkNorm $us $PSPARK_MIN_SPAN }
         $t0 = $ts[0]; $dt = $ts[$n-1] - $t0
         $pts = New-Object 'System.Drawing.PointF[]' $n
         for ($i = 0; $i -lt $n; $i++) {
@@ -812,9 +833,10 @@ $timer.Add_Tick({
                 }
             } catch { $lu = -1.0 }
         }
-        $lg = @()
-        try { if ($j -and $null -ne $j.long) { $lg = @($j.long) } } catch { $lg = @() }
-        $script:byChat = $bc; $script:long = $lg
+        $lg = @(); $rt = @()
+        try { if ($j -and $null -ne $j.long)  { $lg = @($j.long) } }  catch { $lg = @() }
+        try { if ($j -and $null -ne $j.rates) { $rt = @($j.rates) } } catch { $rt = @() }
+        $script:byChat = $bc; $script:long = $lg; $script:rates = $rt
         if ($tp -ne $script:tpm -or $op -ne $script:opm -or
             [Math]::Abs($lu - $script:liveUtil) -ge 0.05) {
             $script:tpm = $tp; $script:opm = $op; $script:liveUtil = $lu

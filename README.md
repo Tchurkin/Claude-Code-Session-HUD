@@ -309,7 +309,7 @@ genuinely quieter rate (not just wobble back over the line) before it can fire a
 rolling over re-arms it silently, because a fresh budget isn't news. The card belongs to no chat, so
 clicking it just dismisses — and it says so. `usage_alert: false` turns it off.
 
-The panel shows a **sparkline** of the whole window — not the twenty minutes the burn fit happens to need, which was never a display decision, so "on pace for 46%" comes
+The panel shows a **sparkline of how fast you're spending it** across the whole window — the rate, not the total. How full the window is is what the bar's own length says; a chart of the same thing answers the wrong question and never comes back down, so an idle hour reads as "still climbing". This one sits on zero when nothing is happening, so "on pace for 46%" comes
 with the shape it was worked out from — a steady climb, a burst that's tailing off, or a flat line
 that just ticked up. It spans the samples' own range rather than 0–100, because twenty quiet minutes
 cover about two points and would otherwise be an invisible line along the bottom; but it never zooms

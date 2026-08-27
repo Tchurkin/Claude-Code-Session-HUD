@@ -56,6 +56,10 @@ WINDOW_DROP    = 3.0         # a fall this size means a new window, not a roundi
 WINDOW_TOL_S   = 120.0       # reset times this close are the same window (the API's jitters by ~1s)
 LONG_EVERY_MS  = 60000       # one sample a minute, kept for the whole window, purely to be drawn
 LONG_MAX       = 400         # five hours of them, plus slack
+# Smoothing for the drawn rate. The reading only moves in whole points, so the difference between
+# one minute and the next is 0, 0, 1, 0, 1 - which is not a rate, it is a staircase. A trailing
+# five-minute average resolves 0.2 %/min, which is fine against a window that sustains around 0.33.
+RATE_SMOOTH_MS = 5 * 60 * 1000
 
 # Turning local token spend into a live percentage. The endpoint answers every 45s at best and only
 # in whole points, so between answers the number is frozen and a burn rate fitted to it needs five
@@ -396,6 +400,28 @@ def _keep_long(cur, ts, util, rolled):
     return lg[-LONG_MAX:]
 
 
+def rate_series(long_hist):
+    """How fast the window is being spent, over time - not how much of it has gone.
+
+    The bar's own length already says how full it is; a chart of the same thing says it twice and
+    answers the wrong question. What you want from a chart is whether you are burning *now*, which
+    means it has to sit at zero when nothing is happening. So: the derivative, smoothed, and drawn
+    against a floor of zero rather than against its own minimum."""
+    pts = [p for p in (long_hist or [])
+           if isinstance(p, (list, tuple)) and len(p) == 2]
+    out = []
+    for i, (ts, v) in enumerate(pts):
+        j = i
+        while j > 0 and ts - pts[j - 1][0] <= RATE_SMOOTH_MS:
+            j -= 1
+        mins = (ts - pts[j][0]) / 60000.0
+        if mins <= 0:
+            out.append([ts, 0.0])                     # no span yet: claim nothing, not infinity
+            continue
+        out.append([ts, round(max(0.0, (v - pts[j][1]) / mins), 3)])
+    return out
+
+
 def weekly_project(cur):
     """Where the weekly window lands, and when it would run out. Returns (percent, hit_ms).
 
@@ -450,6 +476,7 @@ def project(cur):
     cur["weekly_projected"] = int(round(wp)) if wp is not None else None
     cur["weekly_hit"] = wh
     cur["per_pt_default"] = PER_PT_DEFAULT
+    cur["rates"] = rate_series(cur.get("long"))
     if util is None:
         return cur
     p = pace(util, rate, left)
