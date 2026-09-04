@@ -324,7 +324,15 @@ $render = {
 # Narrow and tall rather than wide and short. The three rate figures used to sit in three columns,
 # which is what forced the width; as label-left / value-right rows they read at least as well and
 # let the whole thing come in by nearly a hundred pixels.
-$PANEL_W = 264; $PANEL_H = 400; $PGLOW = 14; $PAD = 14; $COL = 236
+$PANEL_W = 264; $PGLOW = 14; $PAD = 14; $COL = 236
+# The panel is exactly as tall as what it has to show. Its content grows with the number of chats
+# spending - four of them plus an Elsewhere row is five - and against a fixed height the chart simply
+# ran off the bottom: drawn past the rounded background and clipped away by the edge of the canvas.
+$PANEL_ROW_Y = 258       # first row of the spending list
+$PANEL_ROW_H = 21
+$PANEL_BARE_Y = 234      # where the chart's label goes when nothing is listed
+$PANEL_FOOT = 12         # breathing room under the chart
+$script:panelH = 400
 $PSPARK_W = 236; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
 $PSPARK_RATE_TOP = 0.4   # a quiet window still reads as quiet, not as amplified noise
 $fHero  = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
@@ -347,7 +355,7 @@ $panel.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
 $panel.StartPosition   = [System.Windows.Forms.FormStartPosition]::Manual
 $panel.ShowInTaskbar   = $false
 $panel.TopMost         = $true
-$panel.Width = $PANEL_W + $PGLOW*2; $panel.Height = $PANEL_H + $PGLOW*2
+$panel.Width = $PANEL_W + $PGLOW*2; $panel.Height = $script:panelH + $PGLOW*2
 $panel.Left = -20000; $panel.Top = -20000          # off-screen until first opened
 $panel.Add_HandleCreated({ [PerPixelLayered]::NoActivate($panel.Handle) })
 
@@ -439,8 +447,25 @@ function Fmt-Count($n) {
     return "$n"
 }
 
+# How many rows the spending list will draw, and therefore where the chart starts and how tall the
+# whole thing has to be. Worked out before the bitmap exists, because the bitmap's size depends on it.
+function Panel-Rows {
+    $n = @($script:byChat).Count
+    if ($script:elsewhere -gt 0) { $n++ }
+    return $n
+}
+function Panel-ChartY {
+    $n = Panel-Rows
+    if ($n -gt 0) { return $PANEL_ROW_Y + $PANEL_ROW_H * $n + 14 }
+    return $PANEL_BARE_Y + 14
+}
+function Panel-Height { return (Panel-ChartY) + 14 + $PSPARK_H + $PANEL_FOOT }
+
 $renderPanel = {
-    $bmp = New-Object System.Drawing.Bitmap(($PANEL_W + $PGLOW*2), ($PANEL_H + $PGLOW*2),
+    $script:panelH = Panel-Height
+    PanelPlace                                       # the top moves when the height does
+
+    $bmp = New-Object System.Drawing.Bitmap(($PANEL_W + $PGLOW*2), ($script:panelH + $PGLOW*2),
                                             [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -448,7 +473,7 @@ $renderPanel = {
     $g.Clear([System.Drawing.Color]::Transparent)
     $ox = $PGLOW; $oy = $PGLOW                       # panel-local (0,0) in bitmap coords
 
-    $chip = RoundedPath $ox $oy $PANEL_W $PANEL_H 8
+    $chip = RoundedPath $ox $oy $PANEL_W $script:panelH 8
     $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(246,26,26,28))
     $g.FillPath($bg, $chip); $bg.Dispose()
     $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120,200,200,210)), 1
@@ -577,7 +602,7 @@ $renderPanel = {
     if ($rows2.Count -gt 0) {
         TxtL "SPENDING IT" $fEye $DIM $L 240
         $topRate = [double]$rows2[0][1]
-        $yy = 258
+        $yy = $PANEL_ROW_Y
         foreach ($row in $rows2) {
             $sid = [string]$row[0]; $rate = [double]$row[1]
             $meta = Chat-Meta $sid
@@ -597,9 +622,9 @@ $renderPanel = {
                 $sb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(90, $meta.color.R, $meta.color.G, $meta.color.B))
                 $g.FillRectangle($sb, $L, ($oy + $yy + 2), $bw, 2); $sb.Dispose()
             }
-            $yy += 21
+            $yy += $PANEL_ROW_H
         }
-    } else { $yy = 234 }
+    } else { $yy = $PANEL_BARE_Y }
 
     # The whole window, not the twenty minutes the burn fit happens to need - that span was never a
     # display decision. Falls back to the fit's own samples before the first minute has elapsed.
@@ -612,7 +637,7 @@ $renderPanel = {
         try { $span = MinsLong ([int](([double]$h[$h.Count-1][0] - [double]$h[0][0]) / 60000.0)) } catch { }
     }
     $chartLbl = if ($span) { "LAST $span" } else { "THIS SESSION" }
-    $chartY = $yy + 14
+    $chartY = Panel-ChartY
     TxtL $chartLbl $fEye $DIM $L $chartY
     if ($h.Count -ge $SPARK_MIN) {
         $lo = 1000.0; $hi = -1.0
@@ -716,7 +741,7 @@ function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col, $fromZero = $false) {
 function PanelPlace {
     $barR = $form.Left + $GLOW + $OX + $UW
     $panel.Left = [int]($barR - $PANEL_W - $PGLOW)
-    $t = [int]($script:lastTop + $GLOW - 8 - $PANEL_H - $PGLOW)
+    $t = [int]($script:lastTop + $GLOW - 8 - $script:panelH - $PGLOW)
     if ($t -lt 4) { $t = 4 }
     $panel.Top = $t
 }
@@ -891,7 +916,7 @@ $timer.Add_Tick({
         if ($lb -and -not $script:lbWas) {
             $cp = [System.Windows.Forms.Cursor]::Position
             $inP = ($cp.X -ge ($panel.Left + $PGLOW) -and $cp.X -lt ($panel.Left + $PGLOW + $PANEL_W) -and
-                    $cp.Y -ge ($panel.Top + $PGLOW)  -and $cp.Y -lt ($panel.Top + $PGLOW + $PANEL_H))
+                    $cp.Y -ge ($panel.Top + $PGLOW)  -and $cp.Y -lt ($panel.Top + $PGLOW + $script:panelH))
             if (-not $inP -and -not $over) { & $closePanel }
         }
     }
