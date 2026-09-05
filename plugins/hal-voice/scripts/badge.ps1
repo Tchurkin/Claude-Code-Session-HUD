@@ -102,11 +102,15 @@ $script:ord = try { [double]([System.IO.File]::ReadAllText($script:ordMarker)) }
 $script:StackOrd = $script:ord
 
 $GAP = 8
-$script:bottomAnchor = $screen.Bottom - 44 - $GLOW       # sit above VS Code's status bar, bottom-right
+# Where the dock sits is shared and draggable; this is recomputed each poll rather than fixed at
+# startup. Flipped, the anchor is the dock's top edge and the stack hangs from it.
+$script:bottomAnchor = (Dock-AnchorY) - $GLOW
+$script:flipped = Dock-Flipped
 $script:parked = $false; $script:wasParked = $false      # pushed off the top of the dock (see the poll)
 # 37 = the usage meter's own height plus its gap; it rides above the stack and must stay on screen.
 $script:stackCap = Stack-Capacity $script:bottomAnchor ($script:CH + $GAP) 37
 $script:curTop  = $script:bottomAnchor - $script:CH
+if ($script:flipped) { $script:curTop = $script:bottomAnchor }
 $script:target  = $script:curTop
 $script:lastTop = -99999
 $script:chipX   = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }  # drawer pos
@@ -325,7 +329,8 @@ $provisionalOrd = {
     $myY = $form.Top + $script:CH / 2
     $slots = @(); $below = 0
     foreach ($e in $ordered) {
-        $top = $script:bottomAnchor - $below - [int]$e.h
+        $top = if ($script:flipped) { $script:bottomAnchor + $below }
+               else { $script:bottomAnchor - $below - [int]$e.h }
         if ($e.id -ne $script:PopupId) {
             $o = if ($null -ne $e.ord) { [double]$e.ord } else { [double]$e.ts }
             $slots += [pscustomobject]@{ ord = $o; top = $top }
@@ -434,7 +439,9 @@ $timer.Add_Tick({
             $script:parked = ((Stack-RankOf $ordered $script:PopupId) -ge $limit)
             if ($script:parked -ne $script:wasParked) { $script:wasParked = $script:parked; & $render }
             $script:lastStack = $nowMs
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH
+            $script:bottomAnchor = (Dock-AnchorY) - $(if (Dock-Flipped) { -$GLOW } else { $GLOW })
+            $script:flipped = Dock-Flipped
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH $script:flipped
         }
     }
 
@@ -448,7 +455,7 @@ $timer.Add_Tick({
             $script:lastStack = $nowMs
             # Peek, not Sync: we only want to know where everyone is, and rewriting our own slot
             # file every frame while somebody drags is I/O on the paint thread for no reason.
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP (Stack-Peek) $script:CH
+            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP (Stack-Peek) $script:CH $script:flipped
         }
     }
     if ($script:closeReq) { $form.Close(); return }

@@ -566,13 +566,18 @@ function Hud-Enabled {
 }
 
 # Bottom-anchored variant: newest sits AT the bottom anchor, older stack upward above it.
-function Stack-TargetBottom($bottomAnchor, $gap, $ordered, $selfHeight) {
+function Stack-TargetBottom($bottomAnchor, $gap, $ordered, $selfHeight, $flipped = $false) {
     $below = 0
     foreach ($e in $ordered) {
         if ($e.id -eq $script:PopupId) { break }
         if ([int]$e.h -le 0) { continue }     # parked: still holds its place in the order, takes no room
         $below += [int]$e.h + $gap
     }
+    # Flipped, the anchor is the dock's TOP and the stack hangs from it, so the same offset is added
+    # rather than subtracted. The order along the stack is unchanged - the first tab is still nearest
+    # the anchor - so dragging the dock past the midpoint does not reshuffle anything, it only turns
+    # the whole column over.
+    if ($flipped) { return [int]($bottomAnchor + $below) }
     return [int]($bottomAnchor - $below - [int]$selfHeight)
 }
 
@@ -706,6 +711,77 @@ function Dock-Moving {
     Dock-Refresh
     $t = (NowMs) - $script:dockStart
     return ($t -gt (-$script:DOCK_LEAD_MS - 40) -and $t -lt ($script:DOCK_DUR_MS + 40))
+}
+
+# ── where the dock sits on the side of the screen ──────────────────────────────────────────────
+# Ten detents, dragged by the handle. Notched rather than free: at a hundred possible positions you
+# spend effort placing it, and the whole point of the dock is that you never think about it. Ten is
+# enough that it clears anything in the way and few enough that it lands where you meant.
+#
+# Past halfway the dock FLIPS - it hangs from its anchor downward instead of sitting on it upward,
+# so the tabs grow away from the nearest screen edge and the meter stays on the far side of them.
+# Without that, dragging it high would grow the stack straight off the top of the screen.
+$script:DockPosFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "dock.pos"
+$script:DOCK_DETENTS = 10
+$script:DOCK_MARGIN_B = 44      # VS Code's status bar, at the bottom
+$script:DOCK_MARGIN_T = 44      # and a matching gap at the top so it never touches the edge
+$script:dockPos = 0
+$script:dockPosChecked = 0
+
+function Dock-Pos {
+    $now = NowMs
+    if (($now - $script:dockPosChecked) -ge $script:DOCK_POLL_MS) {
+        $script:dockPosChecked = $now
+        try {
+            $v = [int](([PerPixelLayered]::ReadText($script:DockPosFile)).Trim())
+            if ($v -lt 0) { $v = 0 }
+            if ($v -gt ($script:DOCK_DETENTS - 1)) { $v = $script:DOCK_DETENTS - 1 }
+            $script:dockPos = $v
+        } catch { $script:dockPos = 0 }
+    }
+    return $script:dockPos
+}
+
+function Set-DockPos($n) {
+    $n = [int]$n
+    if ($n -lt 0) { $n = 0 }
+    if ($n -gt ($script:DOCK_DETENTS - 1)) { $n = $script:DOCK_DETENTS - 1 }
+    try {
+        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:DockPosFile))
+        [PerPixelLayered]::AtomicWrite($script:DockPosFile, [string]$n)
+    } catch { }
+    $script:dockPos = $n
+    $script:dockPosChecked = 0
+    return $n
+}
+
+# The step between detents, and the y a given detent anchors at. Every overlay derives its own
+# position from these, so they cannot disagree about where the dock is.
+function Dock-Step {
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $travel = $wa.Height - $script:DOCK_MARGIN_B - $script:DOCK_MARGIN_T
+    return $travel / [double]($script:DOCK_DETENTS - 1)
+}
+
+function Dock-AnchorY($pos = $null) {
+    if ($null -eq $pos) { $pos = Dock-Pos }
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    return [int]($wa.Bottom - $script:DOCK_MARGIN_B - (Dock-Step) * [int]$pos)
+}
+
+# Past the midpoint the dock hangs downward instead of standing upward.
+function Dock-Flipped($pos = $null) {
+    if ($null -eq $pos) { $pos = Dock-Pos }
+    return ([int]$pos * 2) -ge $script:DOCK_DETENTS
+}
+
+# Nearest detent to a y on screen - what a drag snaps to.
+function Dock-PosFor($y) {
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $n = [int][Math]::Round((($wa.Bottom - $script:DOCK_MARGIN_B - $y) / (Dock-Step)))
+    if ($n -lt 0) { $n = 0 }
+    if ($n -gt ($script:DOCK_DETENTS - 1)) { $n = $script:DOCK_DETENTS - 1 }
+    return $n
 }
 
 function Set-DockStowed($v) {

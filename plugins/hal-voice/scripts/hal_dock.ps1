@@ -42,6 +42,11 @@ $script:lastHot = $false
 $script:lastBeat = 0
 $script:lastPresence = 0
 $script:curInterval = 200
+$script:maybeDrag = $false   # button down on the handle; still deciding click-vs-drag
+$script:dragging  = $false   # actually moving the dock
+$script:dragFromY = 0
+$script:grabDY    = 0        # cursor-to-handle offset at grab, so it does not jump under the pointer
+$script:DRAG_SLOP = 5        # px before a press becomes a drag rather than a click
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -51,7 +56,7 @@ $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
 $form.Width = $FORM_W; $form.Height = $FORM_H
 $form.Left = [int]($screen.Right - $W - $HG)          # flush right, glow hanging off the edge
-$form.Top  = [int]($screen.Bottom - 44 - $H - $HG)    # bottom of the dock, above the status bar
+$form.Top  = [int]((Dock-AnchorY) - $H - $HG)         # sits at whatever detent the dock is on
 
 $script:flip = Dock-Phase
 
@@ -115,9 +120,14 @@ $form.Add_HandleCreated({ [PerPixelLayered]::NoActivate($form.Handle) })
 $form.Add_Shown({ [PerPixelLayered]::InitClickable($form.Handle); Assert-Topmost $form; & $render })
 $form.Add_MouseDown({
     param($sender, $e)
-    # Either button, same as the readout: nothing else claims a right-click out here.
+    # Either button, same as the readout: nothing else claims a right-click out here. But a press
+    # is now ambiguous - it is a stow toggle OR the start of a drag up the side - so nothing happens
+    # until the button comes back up and we know which it was.
     if (-not (InStrip)) { return }
-    Set-DockStowed (-not (Dock-Stowed))
+    $script:maybeDrag = $true
+    $script:dragging = $false
+    $script:dragFromY = [System.Windows.Forms.Cursor]::Position.Y
+    $script:grabDY = [System.Windows.Forms.Cursor]::Position.Y - $form.Top
 })
 
 $timer = New-Object System.Windows.Forms.Timer
@@ -129,6 +139,32 @@ $timer.Add_Tick({
     # The same curve the dock travels on, so the chevron turns over exactly as the panel leaves -
     # not approximately, identically. It is the same function of the same clock.
     $script:flip = Dock-Phase
+
+    # Click versus drag, resolved on the way up. Past the slop it is a drag and the dock follows the
+    # pointer, snapping to the nearest detent; short of it, it was a click and the dock stows.
+    $lb = ([System.Windows.Forms.Control]::MouseButtons -band
+           ([System.Windows.Forms.MouseButtons]::Left -bor [System.Windows.Forms.MouseButtons]::Right)) -ne 0
+    if ($script:maybeDrag) {
+        $cy = [System.Windows.Forms.Cursor]::Position.Y
+        if (-not $script:dragging -and [Math]::Abs($cy - $script:dragFromY) -ge $script:DRAG_SLOP) {
+            $script:dragging = $true
+        }
+        if ($script:dragging) {
+            # The handle's own centre is what lands on a detent, not the raw cursor.
+            $want = Dock-PosFor ($cy - $script:grabDY + $H / 2 + $HG)
+            if ($want -ne (Dock-Pos)) { [void](Set-DockPos $want) }
+            $form.Top = [int]((Dock-AnchorY) - $H - $HG)
+            [PerPixelLayered]::Move($form.Handle, $form.Left, $form.Top)
+        }
+        if (-not $lb) {
+            if (-not $script:dragging) { Set-DockStowed (-not (Dock-Stowed)) }
+            $script:maybeDrag = $false; $script:dragging = $false
+        }
+    } else {
+        # Somebody else may have moved it - follow the file, never a local copy of the truth.
+        $t = [int]((Dock-AnchorY) - $H - $HG)
+        if ($t -ne $form.Top) { $form.Top = $t; [PerPixelLayered]::Move($form.Handle, $form.Left, $t) }
+    }
 
     $over = InStrip
     if ($over -ne $script:hot) { $script:hot = $over }
@@ -146,7 +182,7 @@ $timer.Add_Tick({
         Poll-HudDaemon
     }
 
-    $want = if (Dock-Moving) { 15 } elseif ($script:hot) { 60 } else { 200 }
+    $want = if ((Dock-Moving) -or $script:maybeDrag) { 15 } elseif ($script:hot) { 60 } else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
     if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }
 })

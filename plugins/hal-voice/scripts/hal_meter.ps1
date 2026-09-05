@@ -95,9 +95,8 @@ $ns = Join-Path $env:USERPROFILE ".claude\hal_voice\badges_stack"
 $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.json"
 $tokensFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "tokens.json"
 $badgesDir  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "badges"
-$dockBottom = $screen.Bottom - 44                  # above VS Code's status bar
 $GAPB = 8
-$script:curTop    = $dockBottom - $CONTENT_H - $GLOW
+$script:curTop    = (Dock-AnchorY) - $CONTENT_H - $GLOW
 $script:targetTop = $script:curTop
 $script:lastTop   = -99999
 $form.Top = $script:curTop
@@ -861,8 +860,14 @@ $timer.Add_Tick({
     if ($nowMs - $script:lastStack -ge 200) {
         $script:lastStack = $nowMs
         $info = StackHeight; $cnt = $info[0]; $sum = $info[1]
-        $bBottom = if ($cnt -eq 0) { $dockBottom } else { $dockBottom - ($sum + ($cnt - 1) * $GAPB) - $GAPB }
-        $script:targetTop = [int]($bBottom - $CONTENT_H - $GLOW)
+        # The meter always sits on the far side of the tabs from the anchor: above them when the dock
+        # stands on the bottom, below them when it hangs from the top. Same rule either way - the
+        # stack grows away from the anchor and the meter is beyond its end - which is why dragging
+        # past the midpoint reads as the whole dock turning over rather than as things rearranging.
+        $anchor = Dock-AnchorY
+        $stack = if ($cnt -eq 0) { 0 } else { $sum + ($cnt - 1) * $GAPB + $GAPB }
+        if (Dock-Flipped) { $script:targetTop = [int]($anchor + $stack - $GLOW) }
+        else              { $script:targetTop = [int]($anchor - $stack - $CONTENT_H - $GLOW) }
         if ($info[2] -ne $script:parked) { $script:parked = $info[2]; & $render }   # "+N" tabs hidden
     }
 
