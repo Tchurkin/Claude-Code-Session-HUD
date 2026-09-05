@@ -412,6 +412,13 @@ def reconcile():
                 or list(st.get("color") or []) != list(hc.slot_color(st.get("slot") or 0))
                 or st.get("gone") or st.get("ended_ts"))                  # was on its way out, came back
                                                                           # (resumed chats reuse the id)
+        # A rostered folder is the authority on its own name. Inferred names drifted once the chats
+        # started reading each other's work, and a wrong one would otherwise sit on the tab until
+        # its next scheduled re-derive - half an hour of two tabs wearing the same label.
+        pin = hb._pinned_label(s.get("cwd"))
+        if st and pin and st.get("label") != pin:
+            hb.update_state(sid, label=pin, label_src="roster", label_ts=now)
+
         brshow = shows.get(sid, False)
         if st and (bool(st.get("showing", True)) != showing      # which chat its window is on
                    or bool(st.get("branch_show", True)) != brshow  # whether its branch says anything

@@ -333,6 +333,13 @@ $PANEL_ROW_Y = 258       # first row of the spending list
 $PANEL_ROW_H = 21
 $PANEL_BARE_Y = 234      # where the chart's label goes when nothing is listed
 $PANEL_FOOT = 12         # breathing room under the chart
+$PANEL_SPEND_H = 40      # the master spend slider, under the chart
+$script:budgetPath = Join-Path (Join-Path $env:USERPROFILE ".claude\shared") "budget.json"
+$script:levels = @()     # ordered level keys from budget.json
+$script:levelLabels = @()
+$script:level = ""       # the one currently set
+$script:spendRects = @() # where each segment was drawn, for the hit test
+$script:badgePy = Join-Path $PSScriptRoot "hal_badge.py"
 $script:panelH = 400
 $PSPARK_W = 236; $PSPARK_H = 42; $PSPARK_MIN_SPAN = 5.0
 $PSPARK_RATE_TOP = 0.4   # a quiet window still reads as quiet, not as amplified noise
@@ -359,6 +366,32 @@ $panel.TopMost         = $true
 $panel.Width = $PANEL_W + $PGLOW*2; $panel.Height = $script:panelH + $PGLOW*2
 $panel.Left = -20000; $panel.Top = -20000          # off-screen until first opened
 $panel.Add_HandleCreated({ [PerPixelLayered]::NoActivate($panel.Handle) })
+# Clicking a spend segment sets the master level for every session. The write goes through
+# hal_badge.py rather than being done here: that file is mostly the coordinating session's, and a
+# read-modify-write in PowerShell is one mistake away from discarding the parts that are not ours.
+$panel.Add_MouseDown({
+    param($sender, $e)
+    $cp = [System.Windows.Forms.Cursor]::Position
+    foreach ($r in @($script:spendRects)) {
+        $x = $panel.Left + [int]$r[0]; $y = $panel.Top + $PGLOW + [int]$r[1]
+        if ($cp.X -ge $x -and $cp.X -lt ($x + [int]$r[2]) -and
+            $cp.Y -ge $y -and $cp.Y -lt ($y + [int]$r[3])) {
+            $lvl = [string]$r[4]
+            if ($lvl -ne $script:level) {
+                $script:level = $lvl                      # optimistic, so the press feels immediate
+                try {
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = "python"
+                    $psi.Arguments = '"{0}" --budget-level {1}' -f $script:badgePy, $lvl
+                    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                    [System.Diagnostics.Process]::Start($psi) | Out-Null
+                } catch {}
+                & $renderPanel
+            }
+            return
+        }
+    }
+})
 
 # Plain English for the colour. The bands are the ramp's own corners, so the words and the hue can
 # never disagree about which side of "you will run out" you are on.
@@ -460,7 +493,11 @@ function Panel-ChartY {
     if ($n -gt 0) { return $PANEL_ROW_Y + $PANEL_ROW_H * $n + 14 }
     return $PANEL_BARE_Y + 14
 }
-function Panel-Height { return (Panel-ChartY) + 14 + $PSPARK_H + $PANEL_FOOT }
+function Panel-Height {
+    $h = (Panel-ChartY) + 14 + $PSPARK_H + $PANEL_FOOT
+    if ($script:levels.Count -gt 0) { $h += $PANEL_SPEND_H }
+    return $h
+}
 
 $renderPanel = {
     $script:panelH = Panel-Height
@@ -659,6 +696,33 @@ $renderPanel = {
         Draw-Spark2 $g $h $L ($oy + $chartY + 14) $PSPARK_W $PSPARK_H $accent $true
     } else {
         TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) $chartY
+    }
+
+    # Master spend level, one control for every session. It lives here rather than on the dock
+    # because it is a setting you change occasionally, not a reading you watch - and the dock is
+    # already carrying everything that has to be glanceable.
+    $script:spendRects = @()
+    if ($script:levels.Count -gt 0) {
+        $sy = (Panel-ChartY) + 14 + $PSPARK_H + 14
+        TxtL "SPEND" $fEye $DIM $L $sy
+        $segY = $sy + 13
+        $segH = 17
+        $segW = [int]($COL / $script:levels.Count)
+        for ($i = 0; $i -lt $script:levels.Count; $i++) {
+            $on = ($script:levels[$i] -eq $script:level)
+            $sx = $L + $i * $segW
+            $w = if ($i -eq $script:levels.Count - 1) { $COL - $i * $segW } else { $segW - 2 }
+            $sp2 = RoundedPath $sx ($oy + $segY) $w $segH 3
+            $fill = if ($on) { [System.Drawing.Color]::FromArgb(235, $accent.R, $accent.G, $accent.B) }
+                    else { [System.Drawing.Color]::FromArgb(70, 90, 90, 100) }
+            $sb2 = New-Object System.Drawing.SolidBrush $fill
+            $g.FillPath($sb2, $sp2); $sb2.Dispose(); $sp2.Dispose()
+            $ink2 = if ($on) { [System.Drawing.Color]::FromArgb(16,16,18) } else { $DIM }
+            $tw2 = [int][Math]::Ceiling($g.MeasureString($script:levelLabels[$i], $fMicro).Width)
+            Draw-OutlinedText $g $script:levelLabels[$i] $fMicro $ink2 `
+                              ([int]($sx + ($w - $tw2) / 2)) ($oy + $segY + 3) 0 'left'
+            $script:spendRects += ,@($sx, $segY, $w, $segH, $script:levels[$i])
+        }
     }
 
     $g.Dispose()
@@ -871,6 +935,17 @@ $timer.Add_Tick({
                     $lu = [Math]::Max(0.0, [Math]::Min(100.0, $au + $extra))
                 }
             } catch { $lu = -1.0 }
+        }
+        # The shared spend contract, if this machine has one. Read only; the slider writes it back
+        # through hal_badge.py so the pm-managed parts of the document cannot be clobbered here.
+        $bj = Read-JsonFile $script:budgetPath
+        if ($bj -and $bj.levels) {
+            try {
+                $ordered = @($bj.levels.PSObject.Properties | Sort-Object { [int]$_.Value.rank })
+                $script:levels = @($ordered | ForEach-Object { $_.Name })
+                $script:levelLabels = @($ordered | ForEach-Object { [string]$_.Value.label })
+                $script:level = [string]$bj.level
+            } catch { $script:levels = @(); $script:levelLabels = @() }
         }
         $lg = @(); $rt = @()
         try { if ($j -and $null -ne $j.long)  { $lg = @($j.long) } }  catch { $lg = @() }

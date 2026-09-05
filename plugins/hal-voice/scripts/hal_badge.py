@@ -728,12 +728,201 @@ def _first_user_message(transcript_path):
     return None
 
 
+SHARED_DIR = os.path.join(hc.HOME, ".claude", "shared")
+
+
+BUDGET_PATH = os.path.join(SHARED_DIR, "budget.json")
+_BUDGET_CACHE = {"mt": None, "doc": None, "resolved": {}}
+
+
+def _budget():
+    """The shared spend contract, or {} when there isn't one. Cached on mtime - this is read on
+    every prompt in every session, so it must not be a file parse each time."""
+    try:
+        mt = os.path.getmtime(BUDGET_PATH)
+    except Exception:
+        return {}
+    if _BUDGET_CACHE["mt"] != mt:
+        try:
+            with open(BUDGET_PATH, encoding="utf-8-sig") as f:
+                _BUDGET_CACHE["doc"] = json.load(f)
+        except Exception:
+            _BUDGET_CACHE["doc"] = {}
+        _BUDGET_CACHE["mt"], _BUDGET_CACHE["resolved"] = mt, {}
+    return _BUDGET_CACHE["doc"] or {}
+
+
+def budget_levels():
+    """(ordered level names, current level) for the slider to draw."""
+    b = _budget()
+    lv = b.get("levels") or {}
+    names = sorted(lv, key=lambda k: (lv[k] or {}).get("rank", 0))
+    return names, str(b.get("level") or "")
+
+
+def budget_policy(agent):
+    """The resolved policy line for one agent: the master level, clamped by that agent's floor and
+    ceiling. A safety-critical worker stays rigorous when the slider is low; a low-stakes one stops
+    burning tokens when it is high."""
+    b = _budget()
+    lv = b.get("levels") or {}
+    if not lv:
+        return ""
+    key = agent or "_"
+    if key in _BUDGET_CACHE["resolved"]:
+        return _BUDGET_CACHE["resolved"][key]
+    order = sorted(lv, key=lambda k: (lv[k] or {}).get("rank", 0))
+    cur = str(b.get("level") or "")
+    if cur not in order:
+        cur = order[len(order) // 2]
+    i = order.index(cur)
+    ov = ((b.get("agent_overrides") or {}).get(agent) or {}) if agent else {}
+    if ov.get("floor") in order:
+        i = max(i, order.index(ov["floor"]))
+    if ov.get("ceiling") in order:
+        i = min(i, order.index(ov["ceiling"]))
+    got = lv[order[i]] or {}
+    out = "Spend level: %s (effort %s, verify %s). %s" % (
+        got.get("label") or order[i], got.get("effort", "?"), got.get("verify", "?"),
+        got.get("policy", ""))
+    _BUDGET_CACHE["resolved"][key] = out
+    return out
+
+
+def set_budget_level(name):
+    """Point the master spend level at `name`, touching nothing else.
+
+    Read-modify-write rather than a rewrite: everything except `level` in that file is managed by
+    the coordinating session - per-level policy text, per-agent floors and ceilings - and a slider
+    that rewrote the document would quietly discard work that is not its own."""
+    try:
+        with open(BUDGET_PATH, encoding="utf-8-sig") as f:
+            doc = json.load(f)
+    except Exception:
+        return False
+    if name not in (doc.get("levels") or {}):
+        return False
+    doc["level"] = name
+    doc["updated"] = time.strftime("%Y-%m-%d")
+    doc["updated_by"] = "hud"
+    try:
+        tmp = BUDGET_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, BUDGET_PATH)
+    except Exception:
+        return False
+    _BUDGET_CACHE["mt"] = None
+    return True
+
+
+def _agent_for(cwd):
+    """Which rostered agent a folder belongs to, when exactly one owns it."""
+    label = _pinned_label(cwd)
+    if not label:
+        return ""
+    for agent, folder in (_ROSTER_CACHE.get("agents") or {}).items():
+        if folder == label:
+            return agent
+    return ""
+
+
+def _pinned_label(cwd):
+    """A name taken from the workspace roster rather than inferred, or "" if there is no roster.
+
+    Inferring a tab's name from what a chat has been talking about was sound while the chats were
+    isolated. They are not any more - they read each other's folders and discuss each other's work -
+    so the inference drifts to the SUBJECT of a conversation rather than its owner. Observed: the
+    College Apps chat, deep in resume content about rocketry, renamed itself "Rocket Research" and
+    collided with the chat that actually is that; the workspace-root chat renamed itself after the
+    project it was reviewing. Sibling de-duplication did not catch either, because siblings are only
+    compared within one folder and these were in different ones.
+
+    A folder is a fact and a conversation's topic is not, so where the workspace says a folder
+    belongs to exactly one agent, that wins and Claude is never asked. A folder holding two agents
+    (they share a repo) is still genuinely ambiguous from the path alone, so it keeps the inference.
+
+    Entirely optional: without ~/.claude/shared this returns "" and nothing changes, which matters
+    because this plugin is public and nobody else has that directory."""
+    if not cwd:
+        return ""
+    try:
+        here = os.path.normcase(os.path.abspath(str(cwd)))
+        roster = _roster()
+        best, best_len = "", -1
+        for folder, label in roster.items():
+            f = os.path.normcase(folder)
+            # A chat opened in a subdirectory still belongs to that project, and the longest match
+            # wins so a project beats anything above it.
+            if (here == f or here.startswith(f + os.sep)) and len(f) > best_len:
+                best, best_len = label, len(f)
+        if best:
+            return best
+        # The workspace root matches EXACTLY and never as a prefix: every project sits under it, so
+        # prefix-matching it would hand its name to any folder the roster does not list - including
+        # the one deliberately left out for holding two agents, which would be worse than the drift
+        # this exists to fix.
+        root = _ROSTER_CACHE.get("root") or ""
+        if root and here == os.path.normcase(root):
+            return "Workspace PM"
+        return ""
+    except Exception:
+        return ""
+
+
+_ROSTER_CACHE = {"mt": None, "map": {}, "root": "", "agents": {}}
+
+# Folder names that do not tidy into a good tab on their own.
+_ROSTER_NAMES = {"claude-code-session-hud-main": "Session HUD"}
+
+
+def _roster():
+    """{absolute folder: display name} for folders owned by exactly one agent. Cached on mtime.
+
+    Folders with two agents are left out on purpose: the path alone cannot say which of them a chat
+    is, so those keep the inferred name."""
+    tp = os.path.join(SHARED_DIR, "team.py")
+    try:
+        mt = os.path.getmtime(tp)
+    except Exception:
+        return {}
+    if _ROSTER_CACHE["mt"] == mt:
+        return _ROSTER_CACHE["map"]
+    out, root, agents_by_label = {}, "", {}
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_hud_team", tp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        root = os.path.abspath(str(getattr(mod, "WORKSPACE", "")))
+        by_folder = {}
+        for agent, meta in (getattr(mod, "ROSTER", {}) or {}).items():
+            by_folder.setdefault(meta.get("folder", ""), []).append(agent)
+        for folder, agents in by_folder.items():
+            if len(agents) != 1 or not folder:
+                continue
+            if folder == ".":
+                continue                                  # the root is exact-match only; see below
+            path = os.path.abspath(os.path.join(root, folder))
+            out[path] = _ROSTER_NAMES.get(folder.lower()) or _proj_label(path) or folder
+            agents_by_label[out[path]] = agents[0]
+    except Exception:
+        out = {}
+    _ROSTER_CACHE["mt"], _ROSTER_CACHE["map"] = mt, out
+    _ROSTER_CACHE["root"] = root if out or root else ""
+    _ROSTER_CACHE["agents"] = agents_by_label
+    return out
+
+
 def _compute_topic(transcript_path, cwd=None, session_id=None):
     """(name, where it came from) - Claude reading the conversation, else the project folder (already
     the right kind of label), else - only for a chat with no folder - a keyword theme.
 
     The source is returned, not assumed: a fallback filed as if Claude had chosen it looks named and
     is never asked about again, which is how a tab gets stuck wearing a bad name."""
+    pinned = _pinned_label(cwd)
+    if pinned:
+        return pinned, "roster"          # a folder is a fact; skip the LLM entirely
     proj = os.path.basename(str(cwd).rstrip("/\\")) if cwd else ""
     msgs = _recent_messages(transcript_path)
     if msgs:
@@ -980,6 +1169,12 @@ def touch(session_id, cwd=None, capture_hwnd=False, state=None, transcript_path=
     src      = prev.get("label_src") or ""
     if name:                                          # caller supplied a fresh, focus-aware name
         label, label_ts, src = name, now, (label_src or "llm")
+    # A rostered folder overrides whatever is on the tab, immediately. Without this a wrong inferred
+    # name sits there until the next re-derive is due, which is half an hour - and the names this
+    # fixes were wrong in the most confusing possible way, with two tabs wearing the same one.
+    pin = _pinned_label(cwd)
+    if pin and label != pin:
+        label, label_ts, src = pin, now, "roster"
     elif transcript_path and (not label or now - label_ts > TOPIC_EVERY):
         topic, tsrc = _compute_topic(transcript_path, cwd, session_id)
         if topic:
@@ -1255,6 +1450,8 @@ def _reconcile(force=False):
 
 
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--budget-level":   # the slider, via the meter overlay
+        sys.exit(0 if set_budget_level(sys.argv[2]) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--beep":      # `hal_badge.py --beep [asking|done]`
         _beep(sys.argv[2] if len(sys.argv) > 2 else "attention")
         time.sleep(0.6)                                     # let the async sound finish before we exit
