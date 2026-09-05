@@ -78,7 +78,8 @@ $script:readingTs = 0      # when the reading we are showing was actually taken
 $script:weeklyProj = -1    # where the week lands at the rate so far
 $script:weeklyHit = 0      # ... and when it would run out, if it would
 $script:elsewhere = 0      # burn we measured but cannot account for locally
-$script:rates = @()        # how fast the window is going, over time - what the chart draws
+$script:rates = @()        # API-derived %/min, the coarse fallback for the chart
+$script:series = @()       # weighted tokens/min at 5s resolution - what the chart draws
 function NowMs { [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 $form = New-Object System.Windows.Forms.Form
@@ -631,7 +632,15 @@ $renderPanel = {
     # The rate, not the total. How full the window is is what the bar's length says; drawing it
     # again here answered the wrong question, and read as "still climbing" through an idle hour
     # because a cumulative line never comes back down.
-    $h = @($script:rates)
+    # Drawn from the token tailer, which records every call with its real timestamp and sees it
+    # within five seconds - so a question you just asked actually appears. The plan's utilization
+    # cannot do this: whole points, no oftener than 45s, which is minutes of latency in a staircase.
+    # It falls back to that coarse series only when the tailer has nothing to say.
+    #
+    # This is spend measured on THIS machine. Anything running elsewhere is in the Elsewhere row
+    # above rather than in the line, which is why the two can disagree.
+    $h = @($script:series); $tokUnits = $true
+    if ($h.Count -lt $SPARK_MIN) { $h = @($script:rates); $tokUnits = $false }
     $span = ""
     if ($h.Count -ge 2) {
         try { $span = MinsLong ([int](([double]$h[$h.Count-1][0] - [double]$h[0][0]) / 60000.0)) } catch { }
@@ -640,9 +649,13 @@ $renderPanel = {
     $chartY = Panel-ChartY
     TxtL $chartLbl $fEye $DIM $L $chartY
     if ($h.Count -ge $SPARK_MIN) {
-        $lo = 1000.0; $hi = -1.0
-        foreach ($p in $h) { $v = [double]$p[1]; if ($v -lt $lo) { $lo = $v }; if ($v -gt $hi) { $hi = $v } }
-        TxtR ("0 - {0:N1} %/min" -f $hi) $fMicro $DIMMER $R $chartY
+        $hi = 0.0
+        foreach ($p in $h) { $v = [double]$p[1]; if ($v -gt $hi) { $hi = $v } }
+        # "peak", not a range: the line is an instantaneous rate and its high point is many times
+        # the ten-minute average in the TOKENS row above. Saying which is which stops the two
+        # numbers looking like they contradict each other.
+        $unit = if ($tokUnits) { "peak " + (Fmt-Count ([int]$hi)) + " /min" } else { "0 - {0:N1} %/min" -f $hi }
+        TxtR $unit $fMicro $DIMMER $R $chartY
         Draw-Spark2 $g $h $L ($oy + $chartY + 14) $PSPARK_W $PSPARK_H $accent $true
     } else {
         TxtL "not enough readings yet" $fMicro $DIMMER ($L + 92) $chartY
@@ -835,6 +848,7 @@ $timer.Add_Tick({
                 if (($nowMs - [int64]$tj.ts) -lt 60000) {
                     $tp = [int]$tj.tpm; $op = [int]$tj.opm; $tot = [double]$tj.total
                     if ($null -ne $tj.by_chat) { $bc = @($tj.by_chat) }
+                    if ($null -ne $tj.series) { $script:series = @($tj.series) }
                 }
             } catch {}
         }

@@ -37,6 +37,15 @@ MAX_IDS      = 4000            # recent message ids kept to dedup across a chunk
 MAX_CHUNK    = 4 * 1024 * 1024 # bytes read from one file in one pass (a cold start could be huge)
 TOP_CHATS    = 4               # how many chats the panel has room to name
 
+# The chart's own series. The plan's utilization is the wrong source for this: it arrives in whole
+# points, no oftener than every 45 seconds, which is minutes of latency quantized into a staircase.
+# Every assistant call is already recorded here with its real timestamp and its exact weight, and
+# the tailer sees it within REFRESH_MS - so a question you asked five seconds ago can actually
+# appear. Five-second buckets give the resolution; the kernel below stops it looking like a comb.
+CHART_MS     = 10 * 60 * 1000
+CHART_BUCKET = 5000            # one bucket is about how fast this can possibly notice anything
+CHART_HALF   = 2               # triangular kernel half-width, so ~25s of smoothing
+
 # Relative to one Opus input token. Output is 5x input on every current model, so it factors out of
 # the per-model scalar; a cache read is a tenth, a 5-minute cache write 1.25, an hour one 2.
 W_OUT, W_READ, W_5M, W_1H = 5.0, 0.10, 1.25, 2.0
@@ -205,6 +214,47 @@ def by_chat(samples, now, window=WINDOW_MS, top=TOP_CHATS, known=None):
     return [[sid, int(round(v))] for sid, v in rows[:top] if v >= 1]
 
 
+def series(samples, now, window=CHART_MS, bucket=CHART_BUCKET, half=CHART_HALF):
+    """Weighted tokens a minute over recent history, finely enough to see a single turn.
+
+    Bucketed rather than differenced: a call is an instant with a weight, not a running total, so
+    the rate over a bucket is simply what landed in it. Then smoothed with a triangular kernel,
+    because unsmoothed five-second buckets are a row of spikes with gaps between them - accurate,
+    and unreadable as a line."""
+    n = max(1, int(window // bucket))
+    lo = now - n * bucket
+    bins = [0.0] * n
+    for s in samples or []:
+        if not (isinstance(s, (list, tuple)) and len(s) >= 2):
+            continue
+        try:
+            ts, w = float(s[0]), float(s[1])          # both, or neither: a bad weight raises too
+        except Exception:
+            continue
+        if ts < lo or ts > now:
+            continue
+        i = int((ts - lo) // bucket)
+        bins[min(max(i, 0), n - 1)] += w
+
+    per = bucket / 60000.0                            # bucket length in minutes
+    rate = [b / per for b in bins]
+    if half > 0:
+        w = [half + 1 - abs(k) for k in range(-half, half + 1)]
+        tot = float(sum(w))
+        out = []
+        for i in range(n):
+            acc = 0.0
+            for k, wk in enumerate(w):
+                j = i + k - half
+                if 0 <= j < n:
+                    acc += rate[j] * wk
+                else:
+                    acc += rate[i] * wk               # hold the edge rather than fading into zero
+            out.append(acc / tot)
+        rate = out
+    return [[int(lo + (i + 0.5) * bucket), int(round(v))] for i, v in enumerate(rate)]
+
+
 def refresh(force=False):
     """Tail every recently-written transcript and republish the rates. Cheap enough for a 5s tick."""
     cur = read()
@@ -277,7 +327,8 @@ def refresh(force=False):
     out = {"ts": now, "scan_ts": scanned, "hot": files, "offsets": offsets,
            "samples": samples, "ids": seen, "total": round(total, 1),
            "tpm": int(round(tpm)), "opm": int(round(opm)), "cpm": int(round(cpm)),
-           "n": len(samples), "by_chat": by_chat(samples, now, known=open_chats())}
+           "n": len(samples), "by_chat": by_chat(samples, now, known=open_chats()),
+           "series": series(samples, now)}
     _publish(out)
     return out
 
