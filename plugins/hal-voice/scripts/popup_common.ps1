@@ -780,12 +780,18 @@ function Dock-AnchorY($pos = $null) {
     Dock-PosRefresh
     $to = Dock-DetentY $script:dockPos
     if ($script:dockFromY -lt 0 -or $script:dockStartMs -le 0) { return $to }
-    $t = (NowMs) - $script:dockStartMs
-    if ($t -ge $script:DOCK_MOVE_MS) { return $to }
-    if ($t -le 0) { return [int]$script:dockFromY }
-    $x = $t / [double]$script:DOCK_MOVE_MS
+    return Dock-Travel $script:dockFromY $to ((NowMs) - $script:dockStartMs)
+}
+
+# The travel curve itself, with the clock passed IN rather than read. Pure, so it can be driven at
+# exact instants - which is the only way to test it honestly: two processes asked for "where is it
+# now" answer at two different nows, and comparing those measures the scheduler, not the code.
+function Dock-Travel($fromY, $toY, $elapsedMs) {
+    if ($elapsedMs -ge $script:DOCK_MOVE_MS) { return [int]$toY }
+    if ($elapsedMs -le 0) { return [int]$fromY }
+    $x = $elapsedMs / [double]$script:DOCK_MOVE_MS
     $k = $x * $x * (3.0 - 2.0 * $x)                    # smoothstep: leaves and arrives at rest
-    return [int]([double]$script:dockFromY + ($to - $script:dockFromY) * $k)
+    return [int]([double]$fromY + ([double]$toY - [double]$fromY) * $k)
 }
 
 function Dock-PosMoving {

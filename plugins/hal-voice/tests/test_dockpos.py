@@ -150,87 +150,90 @@ check("$script:targetOff" in BADGE and "$script:targetOff" in METER, "both speak
 print("wiring: three processes, one anchor, one flip, nobody eases the anchor")
 
 
-# -- 5b. the travel itself, driven through the real function -----------------------------------------
-# Deliberately NOT recomputing the curve here. A test that reimplements the thing it is testing
-# passes against its own copy and says nothing about the code that ships - so this sets the state
-# Dock-AnchorY reads and asks IT, at elapsed times chosen by moving the start instant into the past.
-#
-# Three detents of travel (~266px over 220ms) keeps a few ms of scheduling jitter down to a couple
-# of pixels, well inside the tolerances below.
-def _travel(elapsed_ms, frm=None, to=3):
-    """Ask a fresh process where the dock is, `elapsed_ms` into a move from detent 0 to `to`."""
-    body = "\n".join([
-        '$script:dockPosChecked = [int64]::MaxValue',   # freeze the cache: we are setting state by hand
-        '$script:dockPos = %d' % to,
-        '$script:dockFromY = [double]%s' % ("(Dock-DetentY 0)" if frm is None else str(frm)),
-        '$script:dockStartMs = (NowMs) - %d' % elapsed_ms,
-        'Write-Output ("v|{0}" -f (Dock-AnchorY))',
-        'Write-Output ("from|{0}" -f [int]$script:dockFromY)',
-        'Write-Output ("to|{0}" -f (Dock-DetentY %d))' % to,
-        'Write-Output ("dur|{0}" -f $script:DOCK_MOVE_MS)',
-    ])
-    return _ps(body)
+# -- 5b. the travel itself -----------------------------------------------------------------------
+# Driven through the SHIPPED curve at instants we choose. Two earlier versions of this section were
+# wrong in opposite directions and both are worth remembering: the first recomputed the smoothstep
+# in the test and compared two copies of my own arithmetic, so mutating the real function changed
+# nothing and three mutants walked through it. The second asked two processes "where is it now",
+# which measures the scheduler rather than the code - it failed roughly one run in three, against
+# correct code. Passing the clock IN is what makes it both real and repeatable.
+FROM, TO = 800, 200
+SPAN = FROM - TO
+curve = _ps("\n".join(
+    ['Write-Output ("dur|{0}" -f $script:DOCK_MOVE_MS)'] +
+    ['Write-Output ("t%d|{0}" -f (Dock-Travel %d %d %%d))'.replace("%%d", str(ms)) % (ms, FROM, TO)
+     for ms in (0, 20, 55, 110, 165, 200, 220, 500)] +
+    # Parenthesised: PowerShell reads a bare -50 in argument position as a parameter name.
+    ['Write-Output ("neg|{0}" -f (Dock-Travel %d %d (-50)))' % (FROM, TO)]))
+DUR = int(curve["dur"])
+at = dict((ms, int(curve["t%d" % ms])) for ms in (0, 20, 55, 110, 165, 200, 220, 500))
+
+check(at[0] == FROM, "at zero it is where it set off from (got %d)" % at[0])
+check(int(curve["neg"]) == FROM, "and before that too, rather than overshooting backwards")
+check(at[220] == TO and at[500] == TO,
+      "once the move is over it sits exactly on the target and stays (%d, %d)" % (at[220], at[500]))
+check(at[110] == FROM - SPAN // 2, "halfway through the time is halfway through the distance (%d)" % at[110])
+
+vals = [at[ms] for ms in (0, 20, 55, 110, 165, 200, 220)]
+check(vals == sorted(vals, reverse=True), "the travel only moves one way: %r" % vals)
+
+# Smoothstep, not a ramp: it leaves and arrives slowly. Exact numbers, because the clock is an
+# argument now - no tolerance needed and nothing to be flaky about.
+first, mid, last = FROM - at[55], at[55] - at[165], at[165] - TO
+check(mid > first * 1.5, "it eases in - the middle covers far more than the start (%d vs %d)" % (mid, first))
+check(mid > last * 1.5, "and eases out - far more than the end (%d vs %d)" % (mid, last))
+check(first == last, "symmetrically (%d vs %d)" % (first, last))
+check(at[20] > FROM - SPAN * 0.05, "barely moves in the first tenth (%d of %d)" % (FROM - at[20], SPAN))
+
+# Two processes, identical inputs, identical output - the property the whole design rests on, now
+# asked in a way that can actually answer it.
+again = _ps("\n".join(
+    'Write-Output ("t%d|{0}" -f (Dock-Travel %d %d %s))' % (ms, FROM, TO, ms)
+    for ms in (0, 20, 55, 110, 165, 200, 220, 500)))
+check(all(again["t%d" % ms] == curve["t%d" % ms] for ms in at),
+      "two processes agree exactly at every instant: %r vs %r"
+      % ([again["t%d" % m] for m in sorted(at)], [curve["t%d" % m] for m in sorted(at)]))
+print("travel: shipped curve, exact, symmetric, identical across processes")
 
 
-DUR = int(_travel(0)["dur"])
-at0 = _travel(0)
-FROM, TO = int(at0["from"]), int(at0["to"])
-span = FROM - TO
-check(span > 200, "three detents is a decent span to measure over (%dpx)" % span)
-
-check(abs(int(at0["v"]) - FROM) <= 8, "at the start it is where it set off from (got %s)" % at0["v"])
-done = _travel(DUR + 200)
-check(int(done["v"]) == TO, "once the move is over it sits exactly on the detent (got %s)" % done["v"])
-late = _travel(DUR * 4)
-check(int(late["v"]) == TO, "and stays there rather than drifting past (got %s)" % late["v"])
-
-# Smoothstep, not a ramp - asserted by SHAPE rather than by absolute value at a chosen instant.
-# Setting up the state costs a few unpredictable milliseconds before the reading is taken, which
-# shifts every sample by the same unknown amount; the shape survives that, a single absolute value
-# does not. (Learned the hard way: the first version of this compared one sample against a computed
-# value and failed against correct code.)
-covered = [FROM - int(_travel(int(DUR * f))["v"]) for f in (0.10, 0.35, 0.65, 0.90)]
-check(covered == sorted(covered), "the travel only moves one way: %r" % covered)
-slices = [covered[i + 1] - covered[i] for i in range(3)]
-check(slices[1] > slices[0] * 1.3,
-      "it eases IN - the middle of the move covers more than the start (%r of %dpx)" % (slices, span))
-check(slices[1] > slices[2] * 1.3,
-      "and eases OUT - and more than the end (%r)" % slices)
-
-# Two processes, same instant, same answer - the property the whole design rests on.
-a, b = _travel(int(DUR * 0.4)), _travel(int(DUR * 0.4))
-check(abs(int(a["v"]) - int(b["v"])) <= 8,
-      "two processes agree mid-travel (%s vs %s)" % (a["v"], b["v"]))
-print("travel: real function, eased, settles exactly, agrees across processes")
+# The live function has to actually use it, and settle on the detent when the move is done. This is
+# the only part that reads the clock, so it is asserted loosely on purpose.
+settled = _ps("\n".join([
+    '$script:dockPosChecked = [int64]::MaxValue',
+    '$script:dockPos = 3',
+    '$script:dockFromY = [double](Dock-DetentY 0)',
+    '$script:dockStartMs = (NowMs) - ($script:DOCK_MOVE_MS * 3)',
+    'Write-Output ("v|{0}" -f (Dock-AnchorY))',
+    'Write-Output ("d3|{0}" -f (Dock-DetentY 3))',
+    'Write-Output ("moving|{0}" -f (Dock-PosMoving))',
+]))
+check(int(settled["v"]) == int(settled["d3"]),
+      "a finished move leaves the dock exactly on its detent (%s vs %s)" % (settled["v"], settled["d3"]))
+check(settled["moving"] == "False", "and it stops reporting itself as moving")
+check("Dock-Travel" in COMMON and "return Dock-Travel" in COMMON,
+      "and Dock-AnchorY goes through the same curve rather than its own copy")
 
 
-# A move started mid-flight sets off from where the dock VISUALLY is, not from the detent it was
-# last heading for. Without that, dragging quickly through several detents restarts from a stale
-# point each time and the dock stutters backwards.
+# A move begun mid-flight sets off from where the dock VISUALLY is, never from the detent it was
+# heading for - otherwise dragging quickly through several notches restarts from a stale point and
+# the dock stutters backwards.
 mv = _ps("\n".join([
     '$script:DockPosFile = "%s"' % os.path.join(tmp, "pos3").replace("\\", "\\\\"),
     '$script:dockPosChecked = [int64]::MaxValue',
     '$script:dockPos = 6',
     '$script:dockFromY = [double](Dock-DetentY 0)',
-    '$script:dockStartMs = (NowMs) - %d' % (int(DUR * 0.5)),
-    'Write-Output ("mid|{0}" -f (Dock-AnchorY))',
-    '[void](Set-DockPos 9)',                         # change target while still travelling
+    # A third of the way in, so the move is still comfortably in flight even if this
+    # process is descheduled for a hundred milliseconds between here and the next line.
+    '$script:dockStartMs = (NowMs) - 70',
+    '[void](Set-DockPos 9)',
     'Write-Output ("newfrom|{0}" -f [int]$script:dockFromY)',
     'Write-Output ("d0|{0}" -f (Dock-DetentY 0))',
     'Write-Output ("d6|{0}" -f (Dock-DetentY 6))',
 ]))
-midv, newfrom = int(mv["mid"]), int(mv["newfrom"])
-d0, d6 = int(mv["d0"]), int(mv["d6"])
-# Not a tight tolerance against `midv`: setting up and reading costs milliseconds during which the
-# dock genuinely travels on, so the two are not the same instant. What must be true is that the new
-# move set off from a point ON the travel - never from the detent it started at, and never from the
-# one it was heading for, either of which is the stale-restart bug.
-check(newfrom <= midv,
-      "a move begun mid-flight sets off from at least as far along as it had got (%d vs %d)"
-      % (newfrom, midv))
-check(newfrom < d0 - 20 and newfrom > d6 + 20,
-      "and from between the two detents rather than either of them (%d, between %d and %d)"
-      % (newfrom, d6, d0))
+newfrom, d0, d6 = int(mv["newfrom"]), int(mv["d0"]), int(mv["d6"])
+check(newfrom < d0 - 10 and newfrom > d6 + 10,
+      "a move begun mid-flight sets off from between the detents, not from either of them "
+      "(%d, between %d and %d)" % (newfrom, d6, d0))
 print("restart: a new target mid-drag continues from the current position")
 
 
