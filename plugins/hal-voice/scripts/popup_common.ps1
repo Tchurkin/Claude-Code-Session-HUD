@@ -725,48 +725,89 @@ $script:DockPosFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice")
 $script:DOCK_DETENTS = 10
 $script:DOCK_MARGIN_B = 44      # VS Code's status bar, at the bottom
 $script:DOCK_MARGIN_T = 44      # and a matching gap at the top so it never touches the edge
-$script:dockPos = 0
+$script:DOCK_MOVE_MS = 220      # how long the dock takes to travel between detents
+$script:dockPos = 0             # the detent being travelled TO
+$script:dockFromY = -1          # the y it set off from - not the previous detent, wherever it
+                                # visually was, so a fast drag never restarts from a stale point
+$script:dockStartMs = 0
 $script:dockPosChecked = 0
 
-function Dock-Pos {
+function Dock-PosRefresh {
+    # Polled faster while the dock is actually travelling. Every overlay evaluates the same curve
+    # from the same clock, so a late reader lands on the correct value for NOW rather than starting
+    # the move over - but until it reads, it is showing a stale one, and 60ms of stale is visible
+    # when the thing is moving 88px a step.
     $now = NowMs
-    if (($now - $script:dockPosChecked) -ge $script:DOCK_POLL_MS) {
-        $script:dockPosChecked = $now
-        try {
-            $v = [int](([PerPixelLayered]::ReadText($script:DockPosFile)).Trim())
-            if ($v -lt 0) { $v = 0 }
-            if ($v -gt ($script:DOCK_DETENTS - 1)) { $v = $script:DOCK_DETENTS - 1 }
-            $script:dockPos = $v
-        } catch { $script:dockPos = 0 }
-    }
-    return $script:dockPos
-}
-
-function Set-DockPos($n) {
-    $n = [int]$n
-    if ($n -lt 0) { $n = 0 }
-    if ($n -gt ($script:DOCK_DETENTS - 1)) { $n = $script:DOCK_DETENTS - 1 }
+    $due = if (($now - $script:dockStartMs) -lt ($script:DOCK_MOVE_MS + 120)) { 15 } else { $script:DOCK_POLL_MS }
+    if (($now - $script:dockPosChecked) -lt $due) { return }
+    $script:dockPosChecked = $now
     try {
-        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:DockPosFile))
-        [PerPixelLayered]::AtomicWrite($script:DockPosFile, [string]$n)
-    } catch { }
-    $script:dockPos = $n
-    $script:dockPosChecked = 0
-    return $n
+        $p = ([PerPixelLayered]::ReadText($script:DockPosFile)).Trim() -split '\s+'
+        $v = [int]$p[0]
+        if ($v -lt 0) { $v = 0 }
+        if ($v -gt ($script:DOCK_DETENTS - 1)) { $v = $script:DOCK_DETENTS - 1 }
+        $script:dockPos = $v
+        if ($p.Count -ge 3) {
+            $script:dockFromY = [double]$p[1]
+            $script:dockStartMs = [int64]$p[2]
+        } else { $script:dockFromY = -1; $script:dockStartMs = 0 }
+    } catch { $script:dockPos = 0; $script:dockFromY = -1; $script:dockStartMs = 0 }
 }
 
-# The step between detents, and the y a given detent anchors at. Every overlay derives its own
-# position from these, so they cannot disagree about where the dock is.
+function Dock-Pos { Dock-PosRefresh; return $script:dockPos }
+
 function Dock-Step {
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $travel = $wa.Height - $script:DOCK_MARGIN_B - $script:DOCK_MARGIN_T
     return $travel / [double]($script:DOCK_DETENTS - 1)
 }
 
-function Dock-AnchorY($pos = $null) {
-    if ($null -eq $pos) { $pos = Dock-Pos }
+# The exact y of a detent. Whole-numbered, fixed, and what everything else is measured against.
+function Dock-DetentY($pos) {
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     return [int]($wa.Bottom - $script:DOCK_MARGIN_B - (Dock-Step) * [int]$pos)
+}
+
+# Where the dock IS right now - the detent it is heading for, or a point on the way there.
+#
+# The travel is a pure function of the shared clock, exactly like the stow slide, and for the same
+# reason: the dock is a dozen separate windows in three processes, and the only way they move as one
+# object is for each to compute the same number from the same inputs rather than each easing itself
+# toward a target it polled at its own cadence. Doing that was what made dragging look like a pile of
+# tabs being shaken rather than a panel sliding.
+function Dock-AnchorY($pos = $null) {
+    if ($null -ne $pos) { return Dock-DetentY $pos }
+    Dock-PosRefresh
+    $to = Dock-DetentY $script:dockPos
+    if ($script:dockFromY -lt 0 -or $script:dockStartMs -le 0) { return $to }
+    $t = (NowMs) - $script:dockStartMs
+    if ($t -ge $script:DOCK_MOVE_MS) { return $to }
+    if ($t -le 0) { return [int]$script:dockFromY }
+    $x = $t / [double]$script:DOCK_MOVE_MS
+    $k = $x * $x * (3.0 - 2.0 * $x)                    # smoothstep: leaves and arrives at rest
+    return [int]([double]$script:dockFromY + ($to - $script:dockFromY) * $k)
+}
+
+function Dock-PosMoving {
+    Dock-PosRefresh
+    if ($script:dockStartMs -le 0) { return $false }
+    return (((NowMs) - $script:dockStartMs) -lt $script:DOCK_MOVE_MS)
+}
+
+function Set-DockPos($n) {
+    $n = [int]$n
+    if ($n -lt 0) { $n = 0 }
+    if ($n -gt ($script:DOCK_DETENTS - 1)) { $n = $script:DOCK_DETENTS - 1 }
+    $from = Dock-AnchorY                               # set off from wherever it is, mid-flight or not
+    try {
+        [void][System.IO.Directory]::CreateDirectory((Split-Path $script:DockPosFile))
+        [PerPixelLayered]::AtomicWrite($script:DockPosFile, ("{0} {1} {2}" -f $n, [int]$from, (NowMs)))
+    } catch { }
+    $script:dockPos = $n
+    $script:dockFromY = [double]$from
+    $script:dockStartMs = NowMs
+    $script:dockPosChecked = NowMs
+    return $n
 }
 
 # Past the midpoint the dock hangs downward instead of standing upward.

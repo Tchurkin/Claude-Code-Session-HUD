@@ -127,13 +127,111 @@ check("Dock-AnchorY" in METER and "Dock-Flipped" in METER, "so does the meter")
 check("Dock-AnchorY" in DOCK, "and so does the handle")
 check(re.search(r"\$script:bottomAnchor = \(Dock-AnchorY\)", BADGE),
       "a tab recomputes its anchor rather than fixing it at startup")
-check(re.search(r"\$script:target = Stack-TargetBottom .*\$script:flipped", BADGE),
+check(re.search(r"\$script:targetOff = Stack-TargetBottom", BADGE),
       "and passes the flip through to the geometry")
-check(re.search(r"if \(Dock-Flipped\) \{ \$script:targetTop = \[int\]\(\$anchor \+ \$stack", METER),
+check(re.search(r"if \(Dock-Flipped\) \{ \$script:targetOff = \[int\]\(\$stack", METER),
       "the meter goes below the tabs when the dock hangs")
 check(not re.search(r"\$dockBottom = \$screen\.Bottom - 44", METER),
       "and no fixed bottom survives in the meter")
-print("wiring: three processes, one anchor, one flip")
+
+# THE property, and the one that was wrong: the anchor is taken RAW every frame while only the
+# offset within the stack is eased. Easing the anchor as well - which is what happens if you treat
+# it as just another target - makes every window lag the drag by its own spring, at its own poll
+# rate, and the dock comes apart while it moves.
+for name, src in (("a tab", BADGE), ("the meter", METER)):
+    check(re.search(r"\$script:curTop = \(Dock-AnchorY\) \+ \$script:curOff", src),
+          "%s draws at anchor + eased offset, not at an eased absolute position" % name)
+    check(re.search(r"\$script:cur(Off|Top) = \$script:targetOff \} else \{ \$script:curOff \+=", src)
+          or re.search(r"\$script:curOff \+= \$delta", src),
+          "%s eases the OFFSET" % name)
+check(not re.search(r"\$script:curTop \+= \$delta", BADGE + METER),
+      "and neither of them eases an absolute y any more")
+check("$script:targetOff" in BADGE and "$script:targetOff" in METER, "both speak in offsets")
+print("wiring: three processes, one anchor, one flip, nobody eases the anchor")
+
+
+# -- 5b. the travel itself, driven through the real function -----------------------------------------
+# Deliberately NOT recomputing the curve here. A test that reimplements the thing it is testing
+# passes against its own copy and says nothing about the code that ships - so this sets the state
+# Dock-AnchorY reads and asks IT, at elapsed times chosen by moving the start instant into the past.
+#
+# Three detents of travel (~266px over 220ms) keeps a few ms of scheduling jitter down to a couple
+# of pixels, well inside the tolerances below.
+def _travel(elapsed_ms, frm=None, to=3):
+    """Ask a fresh process where the dock is, `elapsed_ms` into a move from detent 0 to `to`."""
+    body = "\n".join([
+        '$script:dockPosChecked = [int64]::MaxValue',   # freeze the cache: we are setting state by hand
+        '$script:dockPos = %d' % to,
+        '$script:dockFromY = [double]%s' % ("(Dock-DetentY 0)" if frm is None else str(frm)),
+        '$script:dockStartMs = (NowMs) - %d' % elapsed_ms,
+        'Write-Output ("v|{0}" -f (Dock-AnchorY))',
+        'Write-Output ("from|{0}" -f [int]$script:dockFromY)',
+        'Write-Output ("to|{0}" -f (Dock-DetentY %d))' % to,
+        'Write-Output ("dur|{0}" -f $script:DOCK_MOVE_MS)',
+    ])
+    return _ps(body)
+
+
+DUR = int(_travel(0)["dur"])
+at0 = _travel(0)
+FROM, TO = int(at0["from"]), int(at0["to"])
+span = FROM - TO
+check(span > 200, "three detents is a decent span to measure over (%dpx)" % span)
+
+check(abs(int(at0["v"]) - FROM) <= 8, "at the start it is where it set off from (got %s)" % at0["v"])
+done = _travel(DUR + 200)
+check(int(done["v"]) == TO, "once the move is over it sits exactly on the detent (got %s)" % done["v"])
+late = _travel(DUR * 4)
+check(int(late["v"]) == TO, "and stays there rather than drifting past (got %s)" % late["v"])
+
+# Smoothstep, not a ramp - asserted by SHAPE rather than by absolute value at a chosen instant.
+# Setting up the state costs a few unpredictable milliseconds before the reading is taken, which
+# shifts every sample by the same unknown amount; the shape survives that, a single absolute value
+# does not. (Learned the hard way: the first version of this compared one sample against a computed
+# value and failed against correct code.)
+covered = [FROM - int(_travel(int(DUR * f))["v"]) for f in (0.10, 0.35, 0.65, 0.90)]
+check(covered == sorted(covered), "the travel only moves one way: %r" % covered)
+slices = [covered[i + 1] - covered[i] for i in range(3)]
+check(slices[1] > slices[0] * 1.3,
+      "it eases IN - the middle of the move covers more than the start (%r of %dpx)" % (slices, span))
+check(slices[1] > slices[2] * 1.3,
+      "and eases OUT - and more than the end (%r)" % slices)
+
+# Two processes, same instant, same answer - the property the whole design rests on.
+a, b = _travel(int(DUR * 0.4)), _travel(int(DUR * 0.4))
+check(abs(int(a["v"]) - int(b["v"])) <= 8,
+      "two processes agree mid-travel (%s vs %s)" % (a["v"], b["v"]))
+print("travel: real function, eased, settles exactly, agrees across processes")
+
+
+# A move started mid-flight sets off from where the dock VISUALLY is, not from the detent it was
+# last heading for. Without that, dragging quickly through several detents restarts from a stale
+# point each time and the dock stutters backwards.
+mv = _ps("\n".join([
+    '$script:DockPosFile = "%s"' % os.path.join(tmp, "pos3").replace("\\", "\\\\"),
+    '$script:dockPosChecked = [int64]::MaxValue',
+    '$script:dockPos = 6',
+    '$script:dockFromY = [double](Dock-DetentY 0)',
+    '$script:dockStartMs = (NowMs) - %d' % (int(DUR * 0.5)),
+    'Write-Output ("mid|{0}" -f (Dock-AnchorY))',
+    '[void](Set-DockPos 9)',                         # change target while still travelling
+    'Write-Output ("newfrom|{0}" -f [int]$script:dockFromY)',
+    'Write-Output ("d0|{0}" -f (Dock-DetentY 0))',
+    'Write-Output ("d6|{0}" -f (Dock-DetentY 6))',
+]))
+midv, newfrom = int(mv["mid"]), int(mv["newfrom"])
+d0, d6 = int(mv["d0"]), int(mv["d6"])
+# Not a tight tolerance against `midv`: setting up and reading costs milliseconds during which the
+# dock genuinely travels on, so the two are not the same instant. What must be true is that the new
+# move set off from a point ON the travel - never from the detent it started at, and never from the
+# one it was heading for, either of which is the stale-restart bug.
+check(newfrom <= midv,
+      "a move begun mid-flight sets off from at least as far along as it had got (%d vs %d)"
+      % (newfrom, midv))
+check(newfrom < d0 - 20 and newfrom > d6 + 20,
+      "and from between the two detents rather than either of them (%d, between %d and %d)"
+      % (newfrom, d6, d0))
+print("restart: a new target mid-drag continues from the current position")
 
 
 # -- 6. a press is a click or a drag, and only one of them stows --------------------------------------

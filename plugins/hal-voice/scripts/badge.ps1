@@ -106,12 +106,14 @@ $GAP = 8
 # startup. Flipped, the anchor is the dock's top edge and the stack hangs from it.
 $script:bottomAnchor = (Dock-AnchorY) - $GLOW
 $script:flipped = Dock-Flipped
+$script:targetOff = 0        # this tab's place in the stack, measured from the dock's anchor
+$script:curOff = 0
 $script:parked = $false; $script:wasParked = $false      # pushed off the top of the dock (see the poll)
 # 37 = the usage meter's own height plus its gap; it rides above the stack and must stay on screen.
 $script:stackCap = Stack-Capacity $script:bottomAnchor ($script:CH + $GAP) 37
-$script:curTop  = $script:bottomAnchor - $script:CH
-if ($script:flipped) { $script:curTop = $script:bottomAnchor }
-$script:target  = $script:curTop
+$script:curOff = $(if ($script:flipped) { $GLOW } else { -$GLOW - $script:CH })
+$script:targetOff = $script:curOff
+$script:curTop  = (Dock-AnchorY) + $script:curOff
 $script:lastTop = -99999
 $script:chipX   = if ($script:stowed) { $FORM_W - $GLOW - $SLIVER } else { $FORM_W - $GLOW - $script:CW }  # drawer pos
 $script:drawX   = $script:chipX     # drawer position PLUS the shared dock offset
@@ -439,9 +441,13 @@ $timer.Add_Tick({
             $script:parked = ((Stack-RankOf $ordered $script:PopupId) -ge $limit)
             if ($script:parked -ne $script:wasParked) { $script:wasParked = $script:parked; & $render }
             $script:lastStack = $nowMs
-            $script:bottomAnchor = (Dock-AnchorY) - $(if (Dock-Flipped) { -$GLOW } else { $GLOW })
             $script:flipped = Dock-Flipped
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP $ordered $script:CH $script:flipped
+            # An OFFSET from the dock's anchor, not an absolute y. Where this tab sits in the stack
+            # is its own business and is eased locally; where the dock is belongs to every overlay
+            # at once and is taken raw, every frame, from the shared curve. Easing that too was what
+            # made a drag look like a pile of tabs being shaken instead of one panel sliding.
+            $script:targetOff = Stack-TargetBottom $(if ($script:flipped) { $GLOW } else { -$GLOW }) `
+                                                   $GAP $ordered $script:CH $script:flipped
         }
     }
 
@@ -455,7 +461,8 @@ $timer.Add_Tick({
             $script:lastStack = $nowMs
             # Peek, not Sync: we only want to know where everyone is, and rewriting our own slot
             # file every frame while somebody drags is I/O on the paint thread for no reason.
-            $script:target = Stack-TargetBottom $script:bottomAnchor $GAP (Stack-Peek) $script:CH $script:flipped
+            $script:targetOff = Stack-TargetBottom $(if ($script:flipped) { $GLOW } else { -$GLOW }) `
+                                                   $GAP (Stack-Peek) $script:CH $script:flipped
         }
     }
     if ($script:closeReq) { $form.Close(); return }
@@ -513,8 +520,12 @@ $timer.Add_Tick({
 
     # vertical: ease into the stack slot (slides the already-blitted surface, no redraw)
     if (-not $script:dragging) {
-        $delta = $script:target - $script:curTop
-        if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:target } else { $script:curTop += $delta * $ease }
+        $delta = $script:targetOff - $script:curOff
+        if ([Math]::Abs($delta) -lt 0.5) { $script:curOff = $script:targetOff } else { $script:curOff += $delta * $ease }
+        # Anchor raw + offset eased. Every tab and the meter add the identical anchor at the identical
+        # instant, so the dock travels as one object however many windows it is made of.
+        $script:bottomAnchor = (Dock-AnchorY) - $(if ($script:flipped) { -$GLOW } else { $GLOW })
+        $script:curTop = (Dock-AnchorY) + $script:curOff
         $newTop = [int]$script:curTop
         if ($newTop -ne $script:lastTop) {
             $script:lastTop = $newTop
@@ -558,8 +569,8 @@ $timer.Add_Tick({
     # Adaptive cadence. 30ms while something moves or the cursor is on us, ~11fps while a chat is
     # working (just the indicator), otherwise a slow idle poll - a tab that is simply sitting there
     # has nothing to redraw and shouldn't cost anything to keep on screen.
-    $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or (Dock-Moving) -or
-              ([Math]::Abs($script:target - $script:curTop) -ge 0.5) -or
+    $moving = $script:dragging -or $script:maybeDrag -or $script:dragNear -or (Dock-Moving) -or (Dock-PosMoving) -or
+              ([Math]::Abs($script:targetOff - $script:curOff) -ge 0.5) -or
               ([Math]::Abs($tgtX - $script:chipX) -ge 0.5)
     # 15ms is the practical floor for a WinForms timer (the message clock ticks ~15.6ms), and
     # it is what makes a drag look continuous rather than stepped. Only while something moves.

@@ -96,8 +96,9 @@ $usageFile  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "usage.
 $tokensFile = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "tokens.json"
 $badgesDir  = Join-Path (Join-Path $env:USERPROFILE ".claude\hal_voice") "badges"
 $GAPB = 8
-$script:curTop    = (Dock-AnchorY) - $CONTENT_H - $GLOW
-$script:targetTop = $script:curTop
+$script:curOff    = -$CONTENT_H - $GLOW    # where the meter sits relative to the dock's anchor
+$script:targetOff = $script:curOff
+$script:curTop    = (Dock-AnchorY) + $script:curOff
 $script:lastTop   = -99999
 $form.Top = $script:curTop
 
@@ -864,10 +865,12 @@ $timer.Add_Tick({
         # stands on the bottom, below them when it hangs from the top. Same rule either way - the
         # stack grows away from the anchor and the meter is beyond its end - which is why dragging
         # past the midpoint reads as the whole dock turning over rather than as things rearranging.
-        $anchor = Dock-AnchorY
+        # An OFFSET from the dock's anchor, never an absolute y. How tall the stack is changes slowly
+        # and is eased; where the dock is changes fast, belongs to every overlay at once, and is
+        # taken raw every frame from the shared curve.
         $stack = if ($cnt -eq 0) { 0 } else { $sum + ($cnt - 1) * $GAPB + $GAPB }
-        if (Dock-Flipped) { $script:targetTop = [int]($anchor + $stack - $GLOW) }
-        else              { $script:targetTop = [int]($anchor - $stack - $CONTENT_H - $GLOW) }
+        if (Dock-Flipped) { $script:targetOff = [int]($stack - $GLOW) }
+        else              { $script:targetOff = [int](-$stack - $CONTENT_H - $GLOW) }
         if ($info[2] -ne $script:parked) { $script:parked = $info[2]; & $render }   # "+N" tabs hidden
     }
 
@@ -1016,8 +1019,9 @@ $timer.Add_Tick({
     }
     $script:lbWas = $lb
 
-    $delta = $script:targetTop - $script:curTop
-    if ([Math]::Abs($delta) -lt 0.5) { $script:curTop = $script:targetTop } else { $script:curTop += $delta * 0.22 }
+    $delta = $script:targetOff - $script:curOff
+    if ([Math]::Abs($delta) -lt 0.5) { $script:curOff = $script:targetOff } else { $script:curOff += $delta * 0.22 }
+    $script:curTop = (Dock-AnchorY) + $script:curOff
     $newTop = [int]$script:curTop
     if ($newTop -ne $script:lastTop) {
         $script:lastTop = $newTop
@@ -1026,7 +1030,8 @@ $timer.Add_Tick({
     }
 
     $want = if (Dock-Moving) { 15 }
-            elseif (([Math]::Abs($script:targetTop - $script:curTop) -ge 0.5) -or $script:hot -or $script:panelOpen) { 30 }
+            elseif ((Dock-PosMoving) -or ([Math]::Abs($script:targetOff - $script:curOff) -ge 0.5) -or
+                    $script:hot -or $script:panelOpen) { 30 }
             else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
     if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }

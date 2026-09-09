@@ -182,7 +182,8 @@ $timer.Add_Tick({
         Poll-HudDaemon
     }
 
-    $want = if ((Dock-Moving) -or $script:maybeDrag) { 15 } elseif ($script:hot) { 60 } else { 200 }
+    $want = if ((Dock-Moving) -or (Dock-PosMoving) -or $script:maybeDrag) { 15 }
+            elseif ($script:hot) { 60 } else { 200 }
     if ($want -ne $script:curInterval) { $script:curInterval = $want; $timer.Interval = $want }
     if ($nowMs - $script:lastBeat -ge 600) { $script:lastBeat = $nowMs; Write-Beat $AliveFile }
 })
