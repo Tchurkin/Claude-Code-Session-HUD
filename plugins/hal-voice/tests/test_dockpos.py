@@ -36,6 +36,36 @@ def _ps(body):
     return dict(l.split("|", 1) for l in r.stdout.strip().splitlines() if "|" in l)
 
 
+
+METER_PS1 = os.path.join(SCRIPTS, "hal_meter.ps1")
+PGLOW = int(re.search(r"\$PGLOW = (\d+)", METER).group(1))
+
+
+def _psm(body):
+    """Like _ps, but with hal_meter's placement helpers available too. They are pulled out by name
+    rather than dot-sourcing the whole overlay, which would try to open a window."""
+    src = "\n".join(_fn_from(METER, n) for n in ("Meter-OffsetFor", "Panel-TopFor"))
+    consts = "\n".join("$%s = %s" % (k, v) for k, v in (
+        ("GLOW", re.search(r"^\$GLOW = (\d+)", METER, re.M).group(1)),
+        ("PGLOW", str(PGLOW)),
+        ("CONTENT_H", str(CONTENT_H)),
+    ))
+    return _ps(consts + "\n" + src + "\n" + body)
+
+
+def _fn_from(src, name):
+    i = src.index("function %s" % name)
+    depth, j = 0, src.index("{", i)
+    for k in range(j, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[i:k + 1]
+    raise AssertionError("unbalanced braces reading %s" % name)
+
+
 got = _ps("""
 Write-Output ('n|{0}' -f $script:DOCK_DETENTS)
 Write-Output ('step|{0:F4}' -f (Dock-Step))
@@ -129,8 +159,8 @@ check(re.search(r"\$script:bottomAnchor = \(Dock-AnchorY\)", BADGE),
       "a tab recomputes its anchor rather than fixing it at startup")
 check(re.search(r"\$script:targetOff = Stack-TargetBottom", BADGE),
       "and passes the flip through to the geometry")
-check(re.search(r"if \(Dock-Flipped\) \{ \$script:targetOff = \[int\]\(\$stack", METER),
-      "the meter goes below the tabs when the dock hangs")
+check(re.search(r"\$script:targetOff = Meter-OffsetFor \$stack \(Dock-Flipped\)", METER),
+      "the meter takes its offset from the shared rule rather than inlining it")
 check(not re.search(r"\$dockBottom = \$screen\.Bottom - 44", METER),
       "and no fixed bottom survives in the meter")
 
@@ -245,6 +275,100 @@ check(re.search(r"\$want = Dock-PosFor", DOCK), "a drag snaps to detents rather 
 check(not re.search(r"if \(-not \(InStrip\)\) \{ return \}\s*\n\s*Set-DockStowed", DOCK),
       "and the press itself no longer stows, or a drag would toggle on the way out")
 print("handle: press is ambiguous until release; drag moves, click stows")
+
+
+# -- 7. nothing in the dock may overlap anything else ------------------------------------------------
+# The bug this exists for: hanging, the tabs sat 2*GLOW too low and the meter - correctly placed a
+# gap below the last tab - was drawn straight through them. The detail panel did the same, because
+# it always opened upward, which is over the stack once the meter has moved to the bottom.
+#
+# Both were geometry, and geometry is exactly what nobody notices until they look at the screen. So
+# this lays the whole dock out through the shipped functions and asserts the rectangles are disjoint.
+GLOW_B = int(re.search(r"\$GLOW=(\d+)", BADGE).group(1))
+CH = int(re.search(r"\$script:CH = (\d+)", BADGE).group(1))
+GAP = int(re.search(r"^\$GAP = (\d+)", BADGE, re.M).group(1))
+GLOW_M = int(re.search(r"^\$GLOW = (\d+)", METER, re.M).group(1))
+CONTENT_H = int(re.search(r"\$UPCT_H \+ 2 \+ \$SBAR_H \+ \$GAP_BARS \+ \$WBAR_H", METER) and
+                _ps('Write-Output ("h|{0}" -f (%d + 2 + %d + %d + %d))' % (
+                    int(re.search(r"\$UPCT_H = (\d+)", METER).group(1)),
+                    int(re.search(r"\$SBAR_H = (\d+)", METER).group(1)),
+                    int(re.search(r"\$GAP_BARS = (\d+)", METER).group(1)),
+                    int(re.search(r"\$WBAR_H = (\d+)", METER).group(1))))["h"])
+GAPB = int(re.search(r"^\$GAPB = (\d+)", METER, re.M).group(1))
+
+# The glow term badge.ps1 actually passes when it places a tab. Lifted from the source so that
+# changing it in the product changes it here too - which is the whole point of the check below.
+_m = re.search(r"Stack-TargetBottom (.+?) \$GAP \$ordered", BADGE)
+check(_m is not None, "found badge.ps1's own call to Stack-TargetBottom")
+GLOW_ARG = _m.group(1).strip()
+
+
+def _layout(n_tabs, flipped):
+    """Screen rects for every tab chip, the meter's content, and the panel - all from real code."""
+    ids = ["t%d" % i for i in range(n_tabs)]
+    ordered = ", ".join("[pscustomobject]@{id='%s';h=%d}" % (i, CH) for i in ids)
+    stack = n_tabs * CH + (n_tabs - 1) * GAPB + GAPB
+    body = ["$ordered = @(%s)" % ordered,
+            "$GLOW = %d" % GLOW_B,
+            "$script:flipped = $%s" % ("true" if flipped else "false"),
+            "$anchor = Dock-AnchorY %d" % (7 if flipped else 0),
+            "Write-Output ('anchor|{0}' -f $anchor)"]
+    for i in ids:
+        body.append("$script:PopupId = '%s'" % i)
+        # GLOW_ARG is lifted verbatim from badge.ps1's own call, not written here. Passing -$GLOW
+        # myself is what let the reported bug survive this test: the offset was right because I
+        # supplied the right argument, while the shipped code supplied the wrong one.
+        body.append("Write-Output ('tab%s|{0}' -f (Stack-TargetBottom %s %d $ordered %d $script:flipped))"
+                    % (i, GLOW_ARG, GAP, CH))
+    got = _ps("\n".join(body))
+    anchor = int(got["anchor"])
+    # form top -> chip rect on screen
+    tabs = [(anchor + int(got["tab" + i]) + GLOW_B,
+             anchor + int(got["tab" + i]) + GLOW_B + CH) for i in ids]
+
+    m = _psm("Write-Output ('off|{0}' -f (Meter-OffsetFor %d $%s))"
+             % (stack, "true" if flipped else "false"))
+    moff = int(m["off"])
+    meter_form_top = anchor + moff
+    meter = (meter_form_top + GLOW_M, meter_form_top + GLOW_M + CONTENT_H)
+
+    pnl = _psm("Write-Output ('t|{0}' -f (Panel-TopFor %d %d $%s %d))"
+               % (meter_form_top, 400, "true" if flipped else "false", 885))
+    ptop = int(pnl["t"])
+    panel = (ptop + PGLOW, ptop + PGLOW + 400)
+    return tabs, meter, panel
+
+
+def _overlap(a, b):
+    return min(a[1], b[1]) - max(a[0], b[0])
+
+
+for flipped in (False, True):
+    for n in (1, 3, 6):
+        tabs, meter, panel = _layout(n, flipped)
+        which = "hanging" if flipped else "standing"
+        for i in range(len(tabs) - 1):
+            ov = _overlap(tabs[i], tabs[i + 1])
+            check(ov <= 0, "%s, %d tabs: tab %d and %d overlap by %d" % (which, n, i, i + 1, ov))
+            check(abs(abs(ov) - GAPB) <= 1,
+                  "%s: consecutive tabs are exactly one gap apart (%d, want %d)" % (which, -ov, GAPB))
+        for i, t in enumerate(tabs):
+            ov = _overlap(t, meter)
+            check(ov <= 0, "%s, %d tabs: the meter overlaps tab %d by %dpx  tabs=%r meter=%r"
+                           % (which, n, i, ov, tabs, meter))
+            ov = _overlap(t, panel)
+            check(ov <= 0, "%s, %d tabs: the panel overlaps tab %d by %dpx  tab=%r panel=%r"
+                           % (which, n, i, ov, t, panel))
+        # The meter sits beyond the END of the stack, and which tab that is depends on which
+        # way the dock grows: hanging, the last tab is the lowest; standing, it is the highest.
+        gap_to_meter = (meter[0] - tabs[-1][1]) if flipped else (tabs[-1][0] - meter[1])
+        check(abs(gap_to_meter - GAPB) <= 1,
+              "%s: the meter sits exactly one gap beyond the end of the stack (%d, want %d)"
+              % (which, gap_to_meter, GAPB))
+        check(_overlap(meter, panel) <= 0,
+              "%s: the panel does not cover the meter that opened it (%r vs %r)" % (which, meter, panel))
+print("layout: tabs, meter and panel are disjoint standing and hanging, 1..6 tabs")
+
 
 import shutil                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)

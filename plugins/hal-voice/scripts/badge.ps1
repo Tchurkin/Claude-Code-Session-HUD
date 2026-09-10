@@ -111,7 +111,7 @@ $script:curOff = 0
 $script:parked = $false; $script:wasParked = $false      # pushed off the top of the dock (see the poll)
 # 37 = the usage meter's own height plus its gap; it rides above the stack and must stay on screen.
 $script:stackCap = Stack-Capacity $script:bottomAnchor ($script:CH + $GAP) 37
-$script:curOff = $(if ($script:flipped) { $GLOW } else { -$GLOW - $script:CH })
+$script:curOff = $(if ($script:flipped) { -$GLOW } else { -$GLOW - $script:CH })
 $script:targetOff = $script:curOff
 $script:curTop  = (Dock-AnchorY) + $script:curOff
 $script:lastTop = -99999
@@ -446,8 +446,11 @@ $timer.Add_Tick({
             # is its own business and is eased locally; where the dock is belongs to every overlay
             # at once and is taken raw, every frame, from the shared curve. Easing that too was what
             # made a drag look like a pile of tabs being shaken instead of one panel sliding.
-            $script:targetOff = Stack-TargetBottom $(if ($script:flipped) { $GLOW } else { -$GLOW }) `
-                                                   $GAP $ordered $script:CH $script:flipped
+            # -GLOW either way: the chip is drawn GLOW inside its form, so turning a chip position
+            # into a form position always subtracts it. Which way the stack grows has nothing to do
+            # with it, and flipping the sign here put every tab 2*GLOW too low - far enough that the
+            # meter, correctly placed a gap below the last tab, landed on top of it instead.
+            $script:targetOff = Stack-TargetBottom (-$GLOW) $GAP $ordered $script:CH $script:flipped
         }
     }
 
@@ -461,8 +464,7 @@ $timer.Add_Tick({
             $script:lastStack = $nowMs
             # Peek, not Sync: we only want to know where everyone is, and rewriting our own slot
             # file every frame while somebody drags is I/O on the paint thread for no reason.
-            $script:targetOff = Stack-TargetBottom $(if ($script:flipped) { $GLOW } else { -$GLOW }) `
-                                                   $GAP (Stack-Peek) $script:CH $script:flipped
+            $script:targetOff = Stack-TargetBottom (-$GLOW) $GAP (Stack-Peek) $script:CH $script:flipped
         }
     }
     if ($script:closeReq) { $form.Close(); return }
@@ -524,7 +526,7 @@ $timer.Add_Tick({
         if ([Math]::Abs($delta) -lt 0.5) { $script:curOff = $script:targetOff } else { $script:curOff += $delta * $ease }
         # Anchor raw + offset eased. Every tab and the meter add the identical anchor at the identical
         # instant, so the dock travels as one object however many windows it is made of.
-        $script:bottomAnchor = (Dock-AnchorY) - $(if ($script:flipped) { -$GLOW } else { $GLOW })
+        $script:bottomAnchor = (Dock-AnchorY) - $GLOW      # form space; see the note above
         $script:curTop = (Dock-AnchorY) + $script:curOff
         $newTop = [int]$script:curTop
         if ($newTop -ne $script:lastTop) {

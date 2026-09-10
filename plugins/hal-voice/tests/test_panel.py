@@ -131,7 +131,7 @@ print("height: %s across 0..5 rows" % heights)
 # disagree - which is a click that lands nowhere, or a background that stops before its content.
 for what, pat in (("the bitmap", r"New-Object System\.Drawing\.Bitmap\(\(\$PANEL_W \+ \$PGLOW\*2\), \(\$script:panelH"),
                   ("the rounded background", r"RoundedPath \$ox \$oy \$PANEL_W \$script:panelH"),
-                  ("where it is placed", r"\$script:lastTop \+ \$GLOW - 8 - \$script:panelH"),
+                  ("where it is placed", r"Panel-TopFor \$script:lastTop \$script:panelH"),
                   ("the click-away test", r"\$panel\.Top \+ \$PGLOW \+ \$script:panelH")):
     check(re.search(pat, METER), "%s uses the computed height" % what)
 check(re.search(r"\$renderPanel = \{\s*\n\s*\$script:panelH = Panel-Height", METER),

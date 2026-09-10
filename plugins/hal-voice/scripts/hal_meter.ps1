@@ -815,12 +815,36 @@ function Draw-Spark2($g, $hist, $x, $y, $w, $h, $col, $fromZero = $false) {
 }
 
 # Sits directly above the meter, right edges aligned, clamped on screen.
+# Where the meter sits relative to the dock's anchor, given how tall the tab stack is. Standing, it
+# is above the stack; hanging, below it - always on the far side of the tabs from the anchor.
+function Meter-OffsetFor($stack, $flipped) {
+    if ($flipped) { return [int]($stack - $GLOW) }
+    return [int](-$stack - $CONTENT_H - $GLOW)
+}
+
+# And where the detail panel opens, given where the meter's form is. Same rule again: away from the
+# tabs, which means the opposite side depending on which way up the dock is.
+function Panel-TopFor($meterTop, $panelH, $flipped, $screenBottom) {
+    if ($flipped) {
+        $t = [int]($meterTop + $GLOW + $CONTENT_H + 8 - $PGLOW)
+        $max = $screenBottom - $panelH - $PGLOW * 2 - 4
+        if ($t -gt $max) { $t = $max }
+    } else {
+        $t = [int]($meterTop + $GLOW - 8 - $panelH - $PGLOW)
+    }
+    if ($t -lt 4) { $t = 4 }
+    return $t
+}
+
 function PanelPlace {
     $barR = $form.Left + $GLOW + $OX + $UW
     $panel.Left = [int]($barR - $PANEL_W - $PGLOW)
-    $t = [int]($script:lastTop + $GLOW - 8 - $script:panelH - $PGLOW)
-    if ($t -lt 4) { $t = 4 }
-    $panel.Top = $t
+    # The panel opens on the far side of the meter from the tabs - above it when the dock stands,
+    # below it when the dock hangs. Always opening upward put it straight over the stack once the
+    # meter had moved to the bottom, which is the same "away from the anchor" rule everything else
+    # in the dock already follows.
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $panel.Top = Panel-TopFor $script:lastTop $script:panelH (Dock-Flipped) $wa.Bottom
 }
 
 $openPanel = {
@@ -869,8 +893,7 @@ $timer.Add_Tick({
         # and is eased; where the dock is changes fast, belongs to every overlay at once, and is
         # taken raw every frame from the shared curve.
         $stack = if ($cnt -eq 0) { 0 } else { $sum + ($cnt - 1) * $GAPB + $GAPB }
-        if (Dock-Flipped) { $script:targetOff = [int]($stack - $GLOW) }
-        else              { $script:targetOff = [int](-$stack - $CONTENT_H - $GLOW) }
+        $script:targetOff = Meter-OffsetFor $stack (Dock-Flipped)
         if ($info[2] -ne $script:parked) { $script:parked = $info[2]; & $render }   # "+N" tabs hidden
     }
 
