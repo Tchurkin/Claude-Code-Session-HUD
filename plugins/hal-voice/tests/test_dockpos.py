@@ -109,7 +109,27 @@ check(flips == [False] * (N // 2) + [True] * (N - N // 2),
 check(not flips[N // 2 - 1] and flips[N // 2], "and it turns over exactly at halfway")
 check(anchors[N // 2] < (BOTTOM - MB + MT) / 2 + STEP,
       "which is also physically past the middle of the screen")
-print("flip: stands for %d..%d, hangs for %d..%d" % (0, N // 2 - 1, N // 2, N - 1))
+# And with no argument it follows where the dock IS, not the detent it is heading for. Off the
+# target, the layout inverts the instant you release the handle and the dock then slides to meet it -
+# a jump followed by a move. Off the live position it turns over as it passes the middle, so the
+# whole thing reads as one motion.
+live = _ps("\n".join([
+    '$script:dockPosChecked = [int64]::MaxValue',
+    '$script:dockPos = %d' % (N - 1),                 # heading for the very top...
+    '$script:dockFromY = [double](Dock-DetentY 0)',   # ...but still down at the bottom
+    '$script:dockStartMs = NowMs',
+    'Write-Output ("headingup|{0}" -f (Dock-Flipped))',
+    '$script:dockPos = 0',                            # and now the reverse
+    '$script:dockFromY = [double](Dock-DetentY %d)' % (N - 1),
+    '$script:dockStartMs = NowMs',
+    'Write-Output ("headingdown|{0}" -f (Dock-Flipped))',
+]))
+check(live["headingup"] == "False",
+      "still standing while it is only on its way up (got %s)" % live["headingup"])
+check(live["headingdown"] == "True",
+      "and still hanging while it is only on its way down (got %s)" % live["headingdown"])
+print("flip: stands for %d..%d, hangs for %d..%d, and turns over on arrival not on release"
+      % (0, N // 2 - 1, N // 2, N - 1))
 
 
 # -- 3. dragging snaps back to the detent it came from ----------------------------------------------
@@ -142,11 +162,34 @@ $first = @([pscustomobject]@{id='me';h=28}, [pscustomobject]@{id='b';h=28})
 Write-Output ('upfirst|{0}'   -f (Stack-TargetBottom 800 8 $first 28 $false))
 Write-Output ('downfirst|{0}' -f (Stack-TargetBottom 100 8 $first 28 $true))
 """)
-check(int(st["up"]) == 800 - 2 * 36 - 28, "standing, the third tab is two rows above the anchor")
-check(int(st["down"]) == 100 + 2 * 36, "hanging, it is two rows below it")
-check(int(st["upfirst"]) == 800 - 28, "the first tab sits at the anchor when standing")
-check(int(st["downfirst"]) == 100, "and at the anchor when hanging - same order, other direction")
-print("stack: grows away from the anchor either way, order unchanged by the flip")
+check(int(st["up"]) == 800 - 2 * 36 - 28, "standing, the last of three is two rows above the anchor")
+check(int(st["down"]) == 100, "and hanging, that same tab is AT the anchor - it is still the top one")
+check(int(st["upfirst"]) == 800 - 28, "the first tab sits at the anchor when standing - the bottom")
+check(int(st["downfirst"]) == 100 + 36, "and one row down from it when hanging - still the lower")
+print("stack: grows away from the anchor either way")
+
+
+# The order you SEE must not change. Nearest-the-anchor is bottom-most standing and top-most
+# hanging, so measuring from the same end of the list turns the column upside down at the midpoint -
+# which is exactly what it used to do. Reported as "don't make the order of the tabs change when I
+# go up"; the only thing that should move is the meter.
+def _visual_order(flipped):
+    ids = ["t0", "t1", "t2", "t3"]
+    ordered = ", ".join("[pscustomobject]@{id='%s';h=28}" % i for i in ids)
+    body = ["$ordered = @(%s)" % ordered]
+    for i in ids:
+        body.append("$script:PopupId = '%s'" % i)
+        body.append("Write-Output ('%s|{0}' -f (Stack-TargetBottom %d 8 $ordered 28 $%s))"
+                    % (i, 100 if flipped else 800, "true" if flipped else "false"))
+    got = _ps("\n".join(body))
+    return [i for i in sorted(ids, key=lambda k: int(got[k]))]
+
+
+up_order, down_order = _visual_order(False), _visual_order(True)
+check(up_order == down_order,
+      "top to bottom, the tabs read the same standing and hanging (%r vs %r)" % (up_order, down_order))
+check(len(set(up_order)) == 4, "and every tab is somewhere (%r)" % up_order)
+print("order: identical top-to-bottom either way - %s" % " -> ".join(up_order))
 
 
 # -- 5. everyone derives it, nobody keeps a copy -----------------------------------------------------
@@ -359,9 +402,11 @@ for flipped in (False, True):
             ov = _overlap(t, panel)
             check(ov <= 0, "%s, %d tabs: the panel overlaps tab %d by %dpx  tab=%r panel=%r"
                            % (which, n, i, ov, t, panel))
-        # The meter sits beyond the END of the stack, and which tab that is depends on which
-        # way the dock grows: hanging, the last tab is the lowest; standing, it is the highest.
-        gap_to_meter = (meter[0] - tabs[-1][1]) if flipped else (tabs[-1][0] - meter[1])
+        # Measured against the extreme tab rather than a position in the list: which list index is
+        # visually last is exactly what changed here, so indexing would bake the old order into the
+        # test. The property is geometric - the meter is one gap beyond the end of the column.
+        lowest, highest = max(t[1] for t in tabs), min(t[0] for t in tabs)
+        gap_to_meter = (meter[0] - lowest) if flipped else (highest - meter[1])
         check(abs(gap_to_meter - GAPB) <= 1,
               "%s: the meter sits exactly one gap beyond the end of the stack (%d, want %d)"
               % (which, gap_to_meter, GAPB))

@@ -567,17 +567,32 @@ function Hud-Enabled {
 
 # Bottom-anchored variant: newest sits AT the bottom anchor, older stack upward above it.
 function Stack-TargetBottom($bottomAnchor, $gap, $ordered, $selfHeight, $flipped = $false) {
+    # Measured from the END of the list when hanging, and from the start when standing - which is
+    # what keeps the tabs in the SAME visible order either way.
+    #
+    # Keeping the first tab nearest the anchor sounds like it preserves the order and does the
+    # opposite, because the anchor is the bottom of the dock when it stands and the top when it
+    # hangs. Nearest-the-anchor therefore means bottom-most in one case and top-most in the other,
+    # so crossing the midpoint turned the whole column upside down. Summing what comes AFTER instead
+    # puts the same tab at the top in both, and dragging past halfway moves the meter and nothing
+    # else - which is the only thing that should visibly change.
+    if ($flipped) {
+        $after = 0
+        $seen = $false
+        foreach ($e in $ordered) {
+            if ($e.id -eq $script:PopupId) { $seen = $true; continue }
+            if (-not $seen) { continue }
+            if ([int]$e.h -le 0) { continue }  # parked: holds its place in the order, takes no room
+            $after += [int]$e.h + $gap
+        }
+        return [int]($bottomAnchor + $after)
+    }
     $below = 0
     foreach ($e in $ordered) {
         if ($e.id -eq $script:PopupId) { break }
         if ([int]$e.h -le 0) { continue }     # parked: still holds its place in the order, takes no room
         $below += [int]$e.h + $gap
     }
-    # Flipped, the anchor is the dock's TOP and the stack hangs from it, so the same offset is added
-    # rather than subtracted. The order along the stack is unchanged - the first tab is still nearest
-    # the anchor - so dragging the dock past the midpoint does not reshuffle anything, it only turns
-    # the whole column over.
-    if ($flipped) { return [int]($bottomAnchor + $below) }
     return [int]($bottomAnchor - $below - [int]$selfHeight)
 }
 
@@ -818,8 +833,12 @@ function Set-DockPos($n) {
 
 # Past the midpoint the dock hangs downward instead of standing upward.
 function Dock-Flipped($pos = $null) {
-    if ($null -eq $pos) { $pos = Dock-Pos }
-    return ([int]$pos * 2) -ge $script:DOCK_DETENTS
+    if ($null -ne $pos) { return ([int]$pos * 2) -ge $script:DOCK_DETENTS }
+    # From where the dock IS, not from the detent it is heading for. Off the target, the layout
+    # inverts the instant you release the handle and then the dock slides to meet it, which reads as
+    # a jump followed by a move; off the live position it turns over as it passes the middle, and the
+    # whole thing is one motion.
+    return (Dock-AnchorY) -le (Dock-DetentY ([int]($script:DOCK_DETENTS / 2)))
 }
 
 # Nearest detent to a y on screen - what a drag snaps to.
